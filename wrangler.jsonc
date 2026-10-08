@@ -1,0 +1,39 @@
+{
+  // Neutral deployment template: it deploys into any Cloudflare account.
+  // `npx github:kombifyio/beads-cloudflare setup` (cli/) copies it, fills in the KV namespace id and
+  // your values, and deploys that copy. Do not put account values in this file.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "beads-cloudflare",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // nodejs_compat: the MCP handler keeps its auth context in AsyncLocalStorage;
+  // global_fetch_strictly_public: required by the OAuth provider for Client ID Metadata Documents.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "TEAM_STORE", "class_name": "TeamStore" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TeamStore"] }],
+  "kv_namespaces": [
+    // OAuth provider storage: clients, grants, tokens. The installer replaces the id.
+    { "binding": "OAUTH_KV", "id": "00000000000000000000000000000000" }
+  ],
+  "vars": {
+    // The single team of phase 1; one TeamStore Durable Object per team name.
+    "TEAM": "default",
+    // Canonical public origin: the OAuth resource (token audience) and issuer.
+    "PUBLIC_ORIGIN": "https://beads.example.workers.dev",
+    // Humans allowed to manage agent API keys over OAuth (comma list of emails). Empty: only the admin token.
+    "ADMIN_EMAILS": "",
+    // Exact GitHub owner/repository -> { trackers: ["tracker-id"], import?: true } mappings.
+    // Empty denies repository exchanges. Import requires an explicit operator grant.
+    "GITHUB_REPOSITORIES": "{}",
+    // Cloudflare Access for SaaS (OIDC) issuer; authorization, token and JWKS URLs derive from it.
+    // Empty: sign-in is not configured and only agent API keys work. See the README.
+    "ACCESS_ISSUER": ""
+  },
+  // Provide with `wrangler secret put`; local values live in .dev.vars.
+  // ADMIN_TOKEN bootstraps key management for installers and operators; it is accepted on /admin/* only.
+  // ACCESS_CLIENT_ID and ACCESS_CLIENT_SECRET are optional secrets: they enable human sign-in.
+  "secrets": { "required": ["COOKIE_ENCRYPTION_KEY", "ADMIN_TOKEN"] }
+}

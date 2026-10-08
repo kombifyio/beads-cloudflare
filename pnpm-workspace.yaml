@@ -1,0 +1,6 @@
+allowBuilds:
+  core-js-pure: false
+  esbuild: true
+  workerd: true
+# Dependencies must stay current through automation (Renovate), so no release-age delay.
+minimumReleaseAge: 0

@@ -1,0 +1,8 @@
+# Copy to .dev.vars for `pnpm dev` (port 8788). Never commit .dev.vars.
+PUBLIC_ORIGIN=http://localhost:8788
+ACCESS_CLIENT_ID=
+ACCESS_CLIENT_SECRET=
+# 32+ random characters; signs the consent-remember cookie.
+COOKIE_ENCRYPTION_KEY=
+# Bootstrap token for /admin/keys (no colons); generate with: openssl rand -base64 32
+ADMIN_TOKEN=

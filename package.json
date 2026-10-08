@@ -1,0 +1,50 @@
+{
+  "name": "beads-cloudflare",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Cloudflare-hosted store for Beads: a declared profile of the bd serve /v0 HTTP contract plus an MCP server.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "beads-cloudflare": "cli/beads-cloudflare.mjs"
+  },
+  "files": [
+    "cli/",
+    "src/",
+    "cloudflare.config.ts",
+    "wrangler.jsonc",
+    "VERSION",
+    "SETUP.md",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "dev": "wrangler dev --port 8788",
+    "types": "wrangler types --strict-vars=false",
+    "gen": "openapi-typescript spec/upstream/openapi.v0.yaml -o src/generated/openapi.v0.ts",
+    "typecheck": "pnpm types && tsc --noEmit",
+    "test": "vitest run",
+    "test:cli": "node --test \"cli/*.test.mjs\"",
+    "version:sync": "node scripts/sync-version.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.1",
+    "@modelcontextprotocol/server": "2.2.0",
+    "agents": "0.25.0",
+    "cf": "1.0.0-beta.13",
+    "wrangler": "4.147.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@types/node": "^26.6.4",
+    "openapi-typescript": "7.13.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  },
+  "packageManager": "pnpm@11.5.3",
+  "engines": {
+    "node": ">=22"
+  }
+}
