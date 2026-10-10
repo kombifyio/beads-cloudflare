@@ -1,7 +1,6 @@
 // The tracker HTTP API: /t/{tracker} + the upstream /v0 path. A declared profile of the bd serve contract.
 import { scopeRefusal, type ApiContext } from "../auth/provider";
 import { trackerAllowed } from "../auth/scopes";
-import { contextFor } from "../tracker/context";
 import { forbiddenTracker, NO_SUCH_ROUTE, problemOut, Refusal, invalid } from "../tracker/problem";
 import type { Out } from "../tracker/problem";
 import type { ReclaimFilter } from "../tracker/lifecycle";
@@ -9,6 +8,7 @@ import type { ReadyFilter } from "../tracker/ready";
 import type { Call, ReadOp, TeamStore, WriteOp } from "../tracker/team-store";
 import { agentHeader, canonicalJson, isObject, isTrackerId, sha256Hex, type Json } from "../tracker/util";
 import { Query } from "./query";
+import { BodyLimitError, readBoundedBody } from "./body";
 import { anchorParams, edgeExportParams, exportParams, blockingParams, countParams, edgeCountParams, queryParams, relatedParams, statsParams, treeParams } from "./params";
 
 
@@ -20,7 +20,7 @@ const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,255}$/;
 type Route =
   | { kind: "health" }
   | { kind: "context" }
-  | { kind: "read"; op: ReadOp; id?: string }
+  | { kind: "read"; op: ReadOp; id?: string; scope?: "import" }
   | { kind: "write"; op: WriteOp; id?: string; large?: boolean; bodyless?: boolean; scope?: "import" };
 
 const CUSTOM_METHODS: Record<string, WriteOp> = {
@@ -65,6 +65,7 @@ export function route(method: string, path: string): Route | undefined {
       POST: { kind: "write", op: "setConfig", large: true },
     },
     "config:statuses": { GET: { kind: "read", op: "getCustomStatuses" } },
+    "config:export": { GET: { kind: "read", op: "exportSettings", scope: "import" } },
     "config:statuses:detailed": { GET: { kind: "read", op: "getCustomStatusesDetailed" } },
     "config:types": { GET: { kind: "read", op: "getCustomTypes" } },
     "config:types:infra": { GET: { kind: "read", op: "getInfraTypes" } },
@@ -250,6 +251,11 @@ function readCall(op: ReadOp, id: string | undefined, url: URL, base: Call): Cal
     case "getInfraTypes":
       q.finish();
       return { ...base, id };
+    case "exportSettings": {
+      const params = { cursor: q.str("cursor"), limit: q.int("limit") };
+      q.finish();
+      return { ...base, params };
+    }
     case "getStats": return { ...base, params: statsParams(q) as unknown as Json };
     case "countIssues": return { ...base, params: countParams(q) as unknown as Json };
     case "queryIssues": return { ...base, params: queryParams(q) as unknown as Json };
@@ -280,8 +286,13 @@ function readCall(op: ReadOp, id: string | undefined, url: URL, base: Call): Cal
 export async function readBody(request: Request, limit: number): Promise<Json> {
   const type = request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase();
   if (type !== "application/json") throw invalid("Content-Type", "this operation accepts application/json only");
-  const text = await request.text();
-  if (new TextEncoder().encode(text).length > limit) throw invalid(undefined, `request body is larger than ${limit} bytes`);
+  let text: string;
+  try {
+    text = new TextDecoder().decode(await readBoundedBody(request, limit));
+  } catch (error) {
+    if (error instanceof BodyLimitError) throw invalid(undefined, error.message);
+    throw error;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -310,7 +321,7 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
 
   // The import route is gated twice: `merge` mode is an ordinary write (beads:write); `replace` mode, which
   // rewrites history, also needs beads:import. The mode is in the body, so the second check follows the read.
-  const refusedScope = scopeRefusal(ctx, matched.kind === "write", false);
+  const refusedScope = scopeRefusal(ctx, matched.kind === "write", matched.kind === "read" && matched.scope === "import");
   if (refusedScope) return refusedScope;
   const importScope = matched.kind === "write" && matched.scope === "import" ? scopeRefusal(ctx, true, true) : undefined;
   if (!trackerAllowed(ctx.props, tracker)) return respond(forbiddenTracker(tracker), requestId);
@@ -335,7 +346,7 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
     }
     if (matched.kind === "context") {
       new Query(url.searchParams).finish();
-      return respond({ status: 200, body: contextFor(tracker, await storeFor(env).projectIdOf(tracker)) }, requestId);
+      return respond({ status: 200, body: await storeFor(env).contextOf(tracker) }, requestId);
     }
 
     const store = storeFor(env);

@@ -3,13 +3,13 @@
 // Two settings project into a normalized table, because the vocabulary is
 // queried by member rather than as one string:
 //
-//   issue_prefix    the prefix an explicit issue id must carry (no projection)
+//   issue_prefix    the prefix every minted and explicit issue id carries (no projection)
 //   status.custom   "name:category" pairs, comma separated -> custom_statuses
 //   types.custom    a JSON array of names                     -> custom_types
 //
 // Keys are case-sensitive. "MyKey" and "mykey" are two settings, and folding
 // them would silently drop one of them.
-import { all, one } from "./model";
+import { all, chunks, one } from "./model";
 import { invalid } from "./problem";
 import { checkMembers } from "./body";
 import type { Out } from "./problem";
@@ -111,15 +111,18 @@ export function parseCustomTypes(value: string): string[] {
 }
 
 /**
- * The issue-id prefix this workspace requires.
+ * The issue-id prefix this workspace mints and requires.
  *
+ * Normalized as upstream `ReadConfigPrefix` (internal/storage/issueops/helpers.go)
+ * reads it: one trailing dash is dropped, because the dash is the separator ids add.
  * It falls back to the tracker name, which is what every id minted before the
  * settings plane existed carries. Reading it rather than hardcoding the tracker
- * is what lets a migrated workspace keep its original ids.
+ * is what lets a migrated workspace keep minting its original ids, and what bd's
+ * own prefix check on a derived child id expects.
  */
 export function issuePrefix(sql: SqlStorage, tracker: string): string {
   const row = one<{ value: string }>(sql, "SELECT value FROM config WHERE tracker = ?1 AND key = ?2", tracker, KEY_ISSUE_PREFIX);
-  const configured = row?.value?.trim() ?? "";
+  const configured = (row?.value?.trim() ?? "").replace(/-$/, "");
   return configured === "" ? tracker : configured;
 }
 
@@ -146,6 +149,28 @@ function project(ctx: Ctx, key: string, value: string | undefined): void {
       ctx.sql.exec("INSERT INTO custom_types (tracker, name, position) VALUES (?, ?, ?)", ctx.tracker, name, position);
     });
   }
+}
+
+/** Guarded logical recovery restores effective vocabularies independently from the stored settings. */
+export function restoreVocabulary(ctx: Ctx, raw: unknown): void {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw invalid("vocabulary", "vocabulary must be an object");
+  const value = raw as Record<string, unknown>;
+  checkMembers(value, ["statuses", "types"], "vocabulary", "vocabulary.");
+  if (!Array.isArray(value.statuses) || !Array.isArray(value.types)) throw invalid("vocabulary", "statuses and types must be arrays");
+  const statusValue = value.statuses.map((status: unknown) => {
+    if (!status || typeof status !== "object" || Array.isArray(status)) throw invalid("vocabulary.statuses", "a status must be an object");
+    const item = status as Record<string, unknown>;
+    checkMembers(item, ["name", "category"], "vocabulary.statuses", "vocabulary.statuses.");
+    if (typeof item.name !== "string" || !STATUS_NAME.test(item.name) || typeof item.category !== "string" ||
+      ![...CATEGORIES, "unspecified"].includes(item.category)) throw invalid("vocabulary.statuses", "invalid status name or category");
+    return item.category === "unspecified" ? item.name : `${item.name}:${item.category}`;
+  }).join(",");
+  // Both validators run before either projection is changed.
+  parseCustomStatuses(statusValue);
+  const typesValue = JSON.stringify(value.types);
+  parseCustomTypes(typesValue);
+  project(ctx, KEY_STATUS_CUSTOM, statusValue);
+  project(ctx, KEY_TYPES_CUSTOM, typesValue);
 }
 
 /** internal/config/yaml_config.go:134-179: the key alone decides, never the value. */
@@ -244,6 +269,28 @@ export function getConfig(sql: SqlStorage, tracker: string, key: string): string
 export function listSettings(sql: SqlStorage, tracker: string): { items: ReturnType<typeof settingJson>[]; has_more: false } {
   const rows = all<{ key: string; value: string }>(sql, "SELECT key, value FROM config WHERE tracker = ?1 ORDER BY key", tracker);
   return { items: rows.filter((r) => !r.key.startsWith("kv.")).map((r) => settingJson(r.key, r.value)), has_more: false };
+}
+
+/** Import-scoped, bounded full configuration export; ordinary listing remains redacted. */
+export function exportSettings(sql: SqlStorage, tracker: string, params: { cursor?: string; limit?: number } = {}) {
+  const limit = params.limit ?? 100;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw invalid("limit", "limit must be from 1 to 200");
+  const sized = all<{ key: string; size: number }>(sql,
+    "SELECT key, length(CAST(key AS BLOB)) + length(CAST(value AS BLOB)) + 64 AS size FROM config WHERE tracker = ?1 AND key > ?2 ORDER BY key LIMIT ?3",
+    tracker, params.cursor ?? "", limit + 1);
+  let take = 0, weight = 0;
+  for (const row of sized.slice(0, limit)) {
+    if (take > 0 && weight + row.size > (4 << 20)) break;
+    take++; weight += row.size;
+  }
+  const picked = sized.slice(0, take);
+  const rows = new Map<string, { key: string; value: string }>();
+  for (const part of chunks(picked.map(row => row.key))) {
+    for (const row of all<{ key: string; value: string }>(sql,
+      `SELECT key, value FROM config WHERE tracker = ?1 AND key IN (${part.map((_, i) => `?${i + 2}`).join(",")})`, tracker, ...part)) rows.set(row.key, row);
+  }
+  const hasMore = sized.length > take;
+  return { items: picked.map(row => rows.get(row.key)!), has_more: hasMore, ...(hasMore ? { next_cursor: picked.at(-1)!.key } : {}) };
 }
 
 /**

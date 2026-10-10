@@ -171,6 +171,26 @@ still the actor of the events.
 
 #### Import modes (`profile.import_merge`)
 
+**Guarded migration (`profile.import_migration_guard_v1`).** A caller must first find this token in the
+authenticated context's `capabilities` array. Opt in with `migration_guard: {schema_version: 1,
+expected_event_head: N}`, where `N` is the tracker-scoped `head` returned by `/events` around its stable
+destination snapshot. This requires `mode: "merge"`, `reject_stale: true`, `beads:import` and a nonempty
+issue batch; claim overrides, prefix-validation bypass, memories and prefix synchronization are refused.
+Without the guard, existing import semantics are unchanged.
+Guarded recovery may retain a historical id already present in the same tracker
+even when its configured prefix changed. A new id still needs an admitted
+prefix; this does not authorize a rename or relax any migration precondition.
+
+Inside the existing write transaction, before any import effect, the entire batch is refused with
+`409 precondition_failed` if the tracker head changed (`migration_event_head_changed`), an existing issue
+is assigned and in progress/hooked or holds a live lease (`migration_claimed_issue`), an absent identity
+has any prior delete event (`migration_tombstoned_issue`, irrespective of the incoming timestamp), or an
+existing record is not strictly older than the incoming record (`migration_record_not_newer`). These
+checks protect all columns, labels, comments and outgoing edges, including the claimant's own rows.
+Success echoes `migration_guard: {schema_version: 1, expected_event_head: N, event_head: M}` with the new
+tracker head. A migration client requires that echo; an uncertain response is inspected, never blindly
+replayed. This is not a replacement for verifying the imported records and dependency results.
+
 The body takes an optional `mode`, `"replace"` or `"merge"`; any other value is `400`.
 
 - **`"replace"`** (the default) is everything above: records replace what is stored, nothing is dropped, and
@@ -181,7 +201,7 @@ The body takes an optional `mode`, `"replace"` or `"merge"`; any other value is 
   limited to 4 MiB (16 MiB with it).
 
 A merge request is `{actor, mode: "merge", issues?, memories?, reject_stale?, skip_prefix_validation?,
-sync_issue_prefix?, override_claims?}`. Records are the same JSONL records, with the same limits (200 records, 5,000 edges, 5,000
+sync_issue_prefix?, override_claims?, migration_guard?}`. Records are the same JSONL records, with the same limits (200 records, 5,000 edges, 5,000
 comments) and the same validation; `settings` and `project_id` are refused (`unknown_parameter`), because a
 merge carries only what upstream's batch carries. The whole request is one transaction, and the stale
 comparison reads the stored row inside it.
@@ -189,7 +209,7 @@ comparison reads the stored row inside it.
 | Member | Meaning (upstream) |
 |---|---|
 | `reject_stale` (boolean, default `false`) | Upstream `RejectStaleUpserts`, which `bd import` sets unless `--allow-stale`. `true`: a stored row whose `updated_at` is strictly later than the record's is kept whole and reported, and the record's labels, comments and edges are not merged either; an equal `updated_at` keeps the stored columns but still merges labels, comments and edges; a strictly later record rewrites the columns below. `false`: the columns below are rewritten whatever the timestamps say. The adapter of `bd import` sends `true`. |
-| `skip_prefix_validation` (boolean, default `false`) | Upstream `SkipPrefixValidation`. `false`: every record id must start with the tracker's `issue_prefix` or one of the comma separated `allowed_prefixes` setting, followed by `-`; a miss is `400` (`param: issues[i].id`) and the whole request is rolled back. |
+| `skip_prefix_validation` (boolean, default `false`) | Upstream `SkipPrefixValidation`. `false`: every new record id must start with the tracker's `issue_prefix` or one of the comma separated `allowed_prefixes` setting, followed by `-`; a miss is `400` (`param: issues[i].id`) and the whole request is rolled back. A guarded migration may retain an existing historical id already held by this same tracker; ordinary merges still validate every id. |
 | `sync_issue_prefix` (string) | Upstream `SyncIssuePrefix`: when it differs from the stored `issue_prefix` setting, the setting is rewritten (existing ids are not renamed). |
 | `override_claims` (boolean, default `false`; extension) | A change of `status` or `assignee` on an existing row acts on a claim, so it goes through the same claim guard as `updateIssue`, `closeIssue` and `releaseIssue`. A **live claim of another principal** is not overridden silently: the record's columns are left as they are (labels, comments and edges still merge) and the row is listed in `claim_conflicts` (`issue_id`, `assignee`, `claimed_by`). With `override_claims: true` the claim is overridden, as `force` does on release. Either way, when the guard says an expired or overridden claim ended, the fencing number is raised, so the previous holder's `x_fencing_token` is stale. |
 
@@ -228,6 +248,43 @@ prefix_synced: boolean, comments: n, edges: n}`. `updated` counts an existing re
 changed (columns, labels, comments or edges), `unchanged` one for which nothing did. Timestamps have
 millisecond precision here, upstream's `DATETIME` has second precision, so a tie is rarer. `memories` are
 `{key, value}` rows, the later one winning, as in replace.
+
+### Logical recovery (`profile.logical_recovery_v1`, scope `beads:import`)
+
+`GET /config:export` returns every stored configuration row as `{items:[{key,value}],has_more,next_cursor?}`,
+including `kv.*`, empty values and credential-bearing values that ordinary config reads omit or redact.
+It requires `beads:read`, `beads:write` and `beads:import`; it is intended for private snapshots, never logs.
+Pages use ascending keys: `limit` is 1 to 200 (default 100), `cursor` is the previous `next_cursor` key.
+A page is cut after roughly 4 MiB of text, with at least one row to preserve progress.
+The ordinary configuration API keeps its existing projection and redaction behavior.
+
+HTTP context and MCP `tracker_context` include `x_mutation_revision`, a non-negative monotonic tracker
+revision. Every successful write through TeamStore advances it inside the same transaction, including
+memory, configuration and project-identity writes that do not append an issue event. A successful
+no-op may advance it conservatively. Refused transactions and idempotency receipt replays do not.
+Authentication/key housekeeping is team credential state and is not part of this tracker revision.
+
+Replace import optionally accepts `restore_guard:{schema_version:1,expected_revision,require_empty}`.
+The import checks the expected revision inside its existing transaction before writing anything.
+Mismatch returns `409 precondition_failed`, reason `restore_revision_changed`. With `require_empty:true`,
+the current mutation revision must be zero; successful historical writes are not an unused destination.
+Any issue, relation, comment, setting, memory, retained vocabulary, journal/tombstone or stored project
+identity refuses the transaction with reason `restore_destination_not_empty`. The first recovery batch
+uses this guard; subsequent bounded batches use `require_empty:false` and the previous response's
+`x_mutation_revision`. A race refuses that batch without overwriting the intervening writer; earlier
+accepted batches remain committed. Stop and inspect on a timeout or refusal, never automatically retry
+an uncertain write. The tool restores only to an explicitly selected exclusive, unused destination.
+
+Guarded replace import also accepts `vocabulary:{statuses:[{name,category}],types:[name]}`. This restores
+the exact effective projections independently of stored config rows: upstream unset can leave a custom
+vocabulary present even when its declaration key is absent. Both vocabularies are validated before
+either is projected and before records are validated against them. This field requires the restore
+guard; existing unguarded imports and clients keep their previous behavior.
+
+The guard does not restore source event sequence numbers, fencing tokens, verified claim principals,
+idempotency receipts, API keys, OAuth grants or Worker secrets. A logical snapshot archives the source
+journal separately and recovery produces new import events. See [operations.md](operations.md) for
+quiescence, private custody, lease handling, batch limits and the distinction from object-wide PITR.
 
 ### Bulk export (`profile.issues_export`, `profile.dependencies_export`, scope `beads:read`)
 

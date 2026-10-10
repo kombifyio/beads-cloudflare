@@ -17,12 +17,14 @@ import { prefixOf, reaches, recordEdgeAdded } from "./edges";
 import { recordEvent, type Ctx } from "./events";
 import { commentIdOut } from "./export";
 import { all, loadIssue, one, SCHEDULING_TYPES, type IssueRow } from "./model";
-import { invalid, Refusal } from "./problem";
+import { invalid, Refusal, refuse } from "./problem";
 import type { Out } from "./problem";
 import { openChildren } from "./issues";
-import { issuePrefix, KEY_ISSUE_PREFIX, storeSetting, validateConfigKey } from "./config";
+import { issuePrefix, KEY_ISSUE_PREFIX, restoreVocabulary, storeSetting, validateConfigKey } from "./config";
+import { trackerRevision } from "./revision";
 import { canonicalJson, hasControlChar, isObject, type Json } from "./util";
 import { isStatus, loadVocab, statusNames } from "./vocab";
+import { admitsImportIdentity } from "./import-prefix";
 
 export const MAX_IMPORT_RECORDS = 200;
 const MAX_IMPORT_EDGES = 5000;
@@ -278,6 +280,32 @@ export function importRecords(ctx: Ctx, body: Json): Out {
 
 const outcome = () => ({ created: 0, updated: 0, unchanged: 0 });
 
+/** Admission is checked inside the existing TeamStore transaction, before settings or any other effect. */
+function guardRestore(ctx: Ctx, body: Json): void {
+  if (body.restore_guard === undefined) {
+    if (body.vocabulary !== undefined) throw invalid("vocabulary", "effective vocabulary recovery requires restore_guard");
+    return;
+  }
+  if (!ctx.preserveProvenance) throw refuse("forbidden", "logical recovery requires beads:import");
+  const guard = body.restore_guard;
+  if (!isObject(guard)) throw invalid("restore_guard", "restore_guard must be an object");
+  checkMembers(guard, ["schema_version", "expected_revision", "require_empty"], "restore_guard", "restore_guard.");
+  if (guard.schema_version !== 1 || !Number.isSafeInteger(guard.expected_revision) || (guard.expected_revision as number) < 0 || typeof guard.require_empty !== "boolean") {
+    throw invalid("restore_guard", "schema_version 1, non-negative expected_revision and boolean require_empty are required");
+  }
+  const current = trackerRevision(ctx.sql, ctx.tracker);
+  if (current !== guard.expected_revision) throw refuse("precondition_failed", "destination changed; inspect the partial recovery before starting again", {
+    reason: "restore_revision_changed", x_expected_revision: guard.expected_revision as number, x_current_revision: current,
+  });
+  if (!guard.require_empty) return;
+  if (current !== 0) throw refuse("precondition_failed", "logical recovery requires an unused destination tracker", { reason: "restore_destination_not_empty" });
+  // Include retained vocabularies, orphan relations and journal tombstones; a previously used tracker is not a fresh recovery destination.
+  const tables = ["issues", "labels", "dependencies", "comments", "config", "memories", "custom_statuses", "custom_types", "events"];
+  const occupied = tables.some(table => one(ctx.sql, `SELECT 1 AS occupied FROM ${table} WHERE tracker = ? LIMIT 1`, ctx.tracker) !== undefined) ||
+    one(ctx.sql, "SELECT 1 AS occupied FROM meta WHERE key = ?", projectKey(ctx.tracker)) !== undefined;
+  if (occupied) throw refuse("precondition_failed", "logical recovery requires an unused empty destination tracker", { reason: "restore_destination_not_empty" });
+}
+
 /** Memories ride along with an import: `{key, value}` rows, a repeated key written twice with the later one winning. */
 function importMemories(ctx: Ctx, raw: unknown): ReturnType<typeof outcome> {
   const { sql, tracker } = ctx;
@@ -303,8 +331,9 @@ function importMemories(ctx: Ctx, raw: unknown): ReturnType<typeof outcome> {
 
 function replaceRecords(ctx: Ctx, body: Json): Out {
   const { sql, tracker } = ctx;
-  checkMembers(body, ["actor", "mode", "project_id", "issues", "memories", "settings"]);
+  checkMembers(body, ["actor", "mode", "project_id", "issues", "memories", "settings", "restore_guard", "vocabulary"]);
   ctx.clientActor = nameMember(body, "actor");
+  guardRestore(ctx, body);
 
   // Settings first: a record may use a status or type the same request configures.
   const settings = outcome();
@@ -339,6 +368,7 @@ function replaceRecords(ctx: Ctx, body: Json): Out {
   if (!Array.isArray(records)) throw invalid("issues", "`issues` must be an array of records");
   if (records.length > MAX_IMPORT_RECORDS) throw invalid("issues", `\`issues\` carries ${records.length} records; the limit is ${MAX_IMPORT_RECORDS} per request`);
 
+  if (body.vocabulary !== undefined) restoreVocabulary(ctx, body.vocabulary);
   const vocab = loadVocab(sql, tracker);
   const issues = { ...outcome(), skipped_stale: 0 };
   let edgeCount = 0;
@@ -394,6 +424,60 @@ function later(a: string, b: string): boolean {
   return Number.isNaN(pa) || Number.isNaN(pb) ? a > b : pa > pb;
 }
 
+interface MigrationGuard { schema_version: 1; expected_event_head: number }
+
+function migrationGuard(ctx: Ctx, body: Json, rejectStale: boolean, overrideClaims: boolean): MigrationGuard | undefined {
+  if (body.migration_guard === undefined) return undefined;
+  const guard = body.migration_guard;
+  if (!isObject(guard)) throw invalid("migration_guard", "`migration_guard` must be an object");
+  checkMembers(guard, ["schema_version", "expected_event_head"], "migration_guard", "migration_guard.");
+  if (guard.schema_version !== 1 || !Number.isSafeInteger(guard.expected_event_head) || (guard.expected_event_head as number) < 0) {
+    throw invalid("migration_guard", "`migration_guard` requires schema_version 1 and a non-negative safe integer expected_event_head");
+  }
+  if (!ctx.preserveProvenance) throw refuse("forbidden", "guarded migration requires beads:import", { param: "migration_guard" });
+  if (!rejectStale || overrideClaims || optBool(body, "skip_prefix_validation") === true ||
+      body.memories !== undefined || body.sync_issue_prefix !== undefined) {
+    throw invalid("migration_guard", "guarded migration requires reject_stale, no claim override, no prefix bypass and no side payload");
+  }
+  return { schema_version: 1, expected_event_head: guard.expected_event_head as number };
+}
+
+const importEventHead = (ctx: Ctx): number =>
+  one<{ head: number | null }>(ctx.sql, "SELECT MAX(seq) AS head FROM events WHERE tracker = ?1", ctx.tracker)?.head ?? 0;
+
+/** Called inside TeamStore's synchronous write transaction, before the first import effect. */
+function guardMigration(ctx: Ctx, guard: MigrationGuard, wanted: Wanted[]): void {
+  if (wanted.length === 0) throw invalid("issues", "guarded migration requires at least one issue");
+  const head = importEventHead(ctx);
+  if (head !== guard.expected_event_head) {
+    throw refuse("precondition_failed", "tracker changed since the migration snapshot; inspect before replanning", {
+      reason: "migration_event_head_changed", x_expected_event_head: guard.expected_event_head, x_current_event_head: head,
+    });
+  }
+  for (const w of wanted) {
+    const existing = loadIssue(ctx.sql, ctx.tracker, w.id);
+    if (!existing) {
+      const deletion = one<{ seq: number }>(ctx.sql,
+        "SELECT seq FROM events WHERE tracker = ?1 AND issue_id = ?2 AND op = 'delete' LIMIT 1", ctx.tracker, w.id);
+      if (deletion) throw refuse("precondition_failed", "migration cannot recreate a deleted identity", {
+        reason: "migration_tombstoned_issue", x_issue_id: w.id,
+      });
+      continue;
+    }
+    if (((existing.status === "in_progress" || existing.status === "hooked") && existing.assignee.trim() !== "") ||
+        (existing.lease_expires_at !== null && later(existing.lease_expires_at, ctx.now))) {
+      throw refuse("precondition_failed", "migration cannot modify a claimed issue", {
+        reason: "migration_claimed_issue", x_issue_id: w.id,
+      });
+    }
+    if (!later(w.columns.updated_at as string, existing.updated_at)) {
+      throw refuse("precondition_failed", "migration record must be strictly newer than its stored issue", {
+        reason: "migration_record_not_newer", x_issue_id: w.id, x_current_updated_at: existing.updated_at,
+      });
+    }
+  }
+}
+
 interface SkippedDependency { issue_id: string; depends_on_id: string; reason: string }
 
 /**
@@ -412,10 +496,11 @@ interface SkippedDependency { issue_id: string; depends_on_id: string; reason: s
  */
 function mergeRecords(ctx: Ctx, body: Json): Out {
   const { sql, tracker } = ctx;
-  checkMembers(body, ["actor", "mode", "issues", "memories", "reject_stale", "skip_prefix_validation", "sync_issue_prefix", "override_claims"]);
+  checkMembers(body, ["actor", "mode", "issues", "memories", "reject_stale", "skip_prefix_validation", "sync_issue_prefix", "override_claims", "migration_guard"]);
   ctx.clientActor = nameMember(body, "actor");
   const rejectStale = optBool(body, "reject_stale") ?? false;
   const overrideClaims = optBool(body, "override_claims") ?? false;
+  const guard = migrationGuard(ctx, body, rejectStale, overrideClaims);
   const preserve = ctx.preserveProvenance === true;
   const skipPrefix = optBool(body, "skip_prefix_validation") ?? false;
   const syncPrefix = optString(body, "sync_issue_prefix", "sync_issue_prefix", true) ?? "";
@@ -444,11 +529,16 @@ function mergeRecords(ctx: Ctx, body: Json): Out {
     const allowed = (one<{ value: string }>(sql, "SELECT value FROM config WHERE tracker = ?1 AND key = 'allowed_prefixes'", tracker)?.value ?? "")
       .split(",").map((p) => p.trim()).filter((p) => p !== "");
     wanted.forEach((w, i) => {
-      if (![prefix, ...allowed].some((p) => w.id.startsWith(`${p}-`))) {
+      // A guarded migration retains historical identities already owned by this tracker.
+      // New identities still require the configured prefix; the guard below fences all effects.
+      const existsInTracker = guard !== undefined && loadIssue(sql, tracker, w.id) !== undefined;
+      if (!admitsImportIdentity(w.id, [prefix, ...allowed], guard !== undefined, existsInTracker)) {
         throw invalid(`issues[${i}].id`, `prefix validation failed for ${w.id}: issue ID ${w.id} does not match configured prefix ${prefix}`);
       }
     });
   }
+
+  if (guard) guardMigration(ctx, guard, wanted);
 
   const issues = { created: 0, updated: 0, unchanged: 0, skipped_stale: 0 };
   const staleIds: string[] = [];
@@ -469,7 +559,9 @@ function mergeRecords(ctx: Ctx, body: Json): Out {
         staleIds.push(w.id);
         continue;
       }
-      write(ctx, { ...w, columns: preserve ? w.columns : stampedColumns(ctx, w.columns), edges: [] }, undefined);
+      write(ctx, { ...w, columns: preserve ? w.columns : stampedColumns(ctx, w.columns), edges: [], comments: [] }, undefined);
+      // Creation follows the same provenance and duplicate rules as an existing-row merge.
+      addComments(ctx, w);
       recordEvent(ctx, { op: "create", kind: "imported", issueId: w.id });
       verdict.set(w.id, "created");
       accepted.push(w);
@@ -568,7 +660,9 @@ function mergeRecords(ctx: Ctx, body: Json): Out {
   }
   return {
     status: 200,
-    body: { mode: "merge", issues, skipped_stale_ids: staleIds, skipped_dependencies: skipped, claim_conflicts: claimConflicts, memories, prefix_synced: prefixSynced, comments: commentCount, edges: edgeCount },
+    body: { mode: "merge", issues, skipped_stale_ids: staleIds, skipped_dependencies: skipped, claim_conflicts: claimConflicts, memories, prefix_synced: prefixSynced, comments: commentCount, edges: edgeCount,
+      ...(guard ? { migration_guard: { ...guard, event_head: importEventHead(ctx) } } : {}),
+    },
   };
 }
 

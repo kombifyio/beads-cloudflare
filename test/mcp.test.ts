@@ -1,6 +1,8 @@
 import { exports } from "cloudflare:workers";
 import { expect, it } from "vitest";
-import { tokenFor } from "./helpers";
+import { call, tokenFor } from "./helpers";
+import { env } from "cloudflare:workers";
+import { SCOPE_IMPORT, SCOPE_READ, SCOPE_WRITE } from "../src/auth/scopes";
 
 /** One JSON-RPC request to the real /mcp endpoint; the reply is plain JSON or a single SSE event. */
 async function rpc(token: string, id: number, method: string, params: object): Promise<any> {
@@ -38,4 +40,17 @@ it("creates a bead and reads it back through one MCP session", async () => {
 
   const fetched = await rpc(token, 3, "tools/call", { name: "bead_get", arguments: { tracker: "mcp", id } });
   expect(fetched.result.structuredContent).toMatchObject({ id, title: "from an agent", created_by: "agent@example.com", labels: ["agent"] });
+});
+
+it("returns the same imported project identity through MCP and HTTP", async () => {
+  const created = await call("POST", "/admin/keys", env.ADMIN_TOKEN, {
+    label: "mcp-project-identity", scopes: [SCOPE_READ, SCOPE_WRITE, SCOPE_IMPORT], trackers: ["mcp-project"],
+  });
+  const token = created.body.key;
+  const project = crypto.randomUUID();
+  expect((await call("POST", "/t/mcp-project/v0/beads/issues:import", token, { actor: "importer", project_id: project })).status).toBe(200);
+  const http = await call("GET", "/t/mcp-project/v0/beads/context", token);
+  const mcp = await rpc(token, 1, "tools/call", { name: "tracker_context", arguments: { tracker: "mcp-project" } });
+  expect(mcp.result.structuredContent.project_id).toBe(project);
+  expect(mcp.result.structuredContent.project_id).toBe(http.body.project_id);
 });

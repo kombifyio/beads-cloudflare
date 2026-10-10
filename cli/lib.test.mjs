@@ -59,7 +59,7 @@ test("reads cf's sign-in state and names the field when the output has another s
   assert.match(readWhoami("not json").problem, /JSON/);
 });
 
-test("reads a deployed Worker's settings back from its newest version and passes the deployment values as environment", () => {
+test("reads the selected active Worker's settings and passes the deployment values as environment", () => {
   const bindings = [
     { name: "PUBLIC_ORIGIN", type: "plain_text", text: "https://s.example.workers.dev" },
     { name: "ADMIN_EMAILS", type: "plain_text", text: "a@example.com" },
@@ -67,9 +67,9 @@ test("reads a deployed Worker's settings back from its newest version and passes
     { name: "OAUTH_KV", type: "kv_namespace", namespace_id: "a".repeat(32) },
     { name: "ADMIN_TOKEN", type: "secret_text" },
   ];
-  const read = readDeployedSettings([{ number: 1, bindings: [] }, { number: 2, bindings }]);
+  const read = readDeployedSettings({ number: 2, bindings });
   assert.deepEqual([read.version, read.origin, read.adminEmails, read.accessIssuer, read.kvId, read.missing], [2, "https://s.example.workers.dev", "a@example.com", "", "a".repeat(32), []]);
-  assert.deepEqual(readDeployedSettings([{ number: 1 }]).missing, ["bindings", "PUBLIC_ORIGIN", "ADMIN_EMAILS", "ACCESS_ISSUER", "OAUTH_KV"]);
+  assert.deepEqual(readDeployedSettings({ number: 1 }).missing, ["bindings", "PUBLIC_ORIGIN", "ADMIN_EMAILS", "ACCESS_ISSUER", "OAUTH_KV"]);
   assert.equal(deployEnv({ name: "s", kvId: "k", origin: "https://o", accessSecrets: true }).BEADS_ACCESS_SECRETS, "1");
   assert.equal(deployEnv({ name: "s", kvId: "k", origin: "https://o" }).BEADS_ADMIN_EMAILS, "");
 });

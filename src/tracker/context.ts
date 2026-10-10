@@ -58,9 +58,11 @@ const BEHAVIOR_TOKENS = [
   "profile.idempotency_key",
   "profile.import",
   "profile.import_merge",
+  "profile.import_migration_guard_v1",
   "profile.issues_export",
   "profile.lease",
   "profile.leases_reclaim",
+  "profile.logical_recovery_v1",
   "profile.optimistic_concurrency",
   "profile.x_extra",
   "project.enforce",
@@ -76,9 +78,9 @@ export const CAPABILITIES = [...OPERATION_TOKENS, ...BEHAVIOR_TOKENS].sort();
 export const MIN_CLIENT_VERSION = "0.1.0";
 
 /** The context document plus this profile's version members (extension members, prefixed `x_`). */
-export type StoreContext = ContextResponse & { x_store_version: string; x_min_client_version: string };
+export type StoreContext = ContextResponse & { x_store_version: string; x_min_client_version: string; x_mutation_revision: number };
 
-export function contextFor(tracker: string, projectId: string = tracker): StoreContext {
+export function contextFor(tracker: string, projectId: string = tracker, mutationRevision = 0): StoreContext {
   return {
     api_version: "v0",
     bd_version: UPSTREAM_VERSION,
@@ -90,5 +92,6 @@ export function contextFor(tracker: string, projectId: string = tracker): StoreC
     capabilities: CAPABILITIES,
     x_store_version: STORE_VERSION,
     x_min_client_version: MIN_CLIENT_VERSION,
+    x_mutation_revision: mutationRevision,
   };
 }

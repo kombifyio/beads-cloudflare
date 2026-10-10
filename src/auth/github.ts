@@ -1,5 +1,6 @@
 // Portable repository authorization. GitHub credentials never enter storage or error responses.
 import { respond, storeFor } from "../http/endpoint";
+import { readBoundedBody } from "../http/body";
 import { SCOPE_IMPORT, SCOPE_READ, SCOPE_WRITE } from "./scopes";
 import { reusableKey } from "../tracker/keys";
 import { invalid, problemOut, Refusal, refuse } from "../tracker/problem";
@@ -9,6 +10,7 @@ const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/;
 const WINDOW_MS = 59 * 60_000;
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
 interface OidcPolicy { repository_id: string; workflow_refs: string[] }
+interface AppReadPolicy { app_id: string; installation_id: string; repositories: string[] }
 interface RepositoryPolicy { trackers: string[]; import?: boolean; oidc?: OidcPolicy }
 
 function policies(raw: string): Record<string, RepositoryPolicy> {
@@ -38,6 +40,24 @@ function policies(raw: string): Record<string, RepositoryPolicy> {
     return parsed as unknown as Record<string, RepositoryPolicy>;
   } catch {
     throw refuse("internal", "GitHub repository authorization is not configured correctly.");
+  }
+}
+
+/** A separate reader grant intersects the existing repository/tracker mapping. */
+function appReadPolicy(raw: string): AppReadPolicy | undefined {
+  if (!raw) return undefined;
+  try {
+    if (new TextEncoder().encode(raw).byteLength > 5120) throw new Error();
+    const app: unknown = JSON.parse(raw);
+    if (!isObject(app) || Object.keys(app).some((key) => !["app_id", "installation_id", "repositories"].includes(key)) ||
+      typeof app.app_id !== "string" || !/^[1-9][0-9]{0,19}$/.test(app.app_id) ||
+      typeof app.installation_id !== "string" || !/^[1-9][0-9]{0,19}$/.test(app.installation_id) ||
+      !Array.isArray(app.repositories) || app.repositories.length === 0 || app.repositories.length > 100 ||
+      app.repositories.some((repository) => typeof repository !== "string" || !REPOSITORY.test(repository)) ||
+      new Set(app.repositories).size !== app.repositories.length) throw new Error();
+    return app as unknown as AppReadPolicy;
+  } catch {
+    throw refuse("internal", "GitHub App reader authorization is not configured correctly.");
   }
 }
 
@@ -101,28 +121,7 @@ export const githubCredentialExpiry = (now: number): string =>
 
 /** Bound buffering before parsing, including bodies whose Content-Length is absent or false. */
 async function boundedJson(body: Request | Response, limit: number): Promise<unknown> {
-  if (!body.body) throw new Error();
-  const reader = body.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > limit) throw new Error();
-      chunks.push(value);
-    }
-  } catch (error) {
-    await reader.cancel().catch(() => {});
-    throw error;
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return JSON.parse(new TextDecoder().decode(bytes));
+  return JSON.parse(new TextDecoder().decode(await readBoundedBody(body, limit)));
 }
 
 async function github(path: string, token: string): Promise<unknown> {
@@ -161,7 +160,8 @@ export async function exchangeGithub(request: Request, env: Env): Promise<Respon
     let body: unknown;
     try { body = await boundedJson(request, 4096); }
     catch { throw invalid(undefined, "Send a JSON object containing repository and tracker, at most 4096 bytes."); }
-    if (!isObject(body) || Object.keys(body).some((key) => key !== "repository" && key !== "tracker") ||
+    if (!isObject(body) || Object.keys(body).some((key) => !["repository", "tracker", "credential_type"].includes(key)) ||
+      (body.credential_type !== undefined && body.credential_type !== "github-app") ||
       typeof body.repository !== "string" || !REPOSITORY.test(body.repository) || !isTrackerId(body.tracker)) {
       throw invalid(undefined, "Send a GitHub owner/repository and a valid tracker.");
     }
@@ -174,7 +174,27 @@ export async function exchangeGithub(request: Request, env: Env): Promise<Respon
     }
     const token = match[1]!;
     let subject: string;
-    if (token.split(".").length === 3) {
+    const appRead = body.credential_type === "github-app";
+    if (appRead) {
+      const reader = appReadPolicy(env.GITHUB_READ_APP ?? "");
+      if (!reader?.repositories.includes(repository) || token.split(".").length !== 3) {
+        throw refuse("forbidden", "A configured GitHub App reader and its App JWT are required.");
+      }
+      // GitHub verifies the App JWT's signature and expiry. Repository membership
+      // uses the existing exact owner/name mapping; App and installation IDs are immutable.
+      const app = await github("/app", token);
+      if (!isObject(app) || !Number.isSafeInteger(app.id) || String(app.id) !== reader.app_id) {
+        throw refuse("forbidden", "The GitHub App is not an authorized reader.");
+      }
+      const installation = await github(`/repos/${repository}/installation`, token);
+      if (!isObject(installation) || !Number.isSafeInteger(installation.id) ||
+        String(installation.id) !== reader.installation_id ||
+        !Number.isSafeInteger(installation.app_id) || String(installation.app_id) !== reader.app_id ||
+        installation.suspended_at !== null) {
+        throw refuse("forbidden", "The GitHub App installation is not an authorized reader for this repository.");
+      }
+      subject = `github-exchange:app:${app.id}:installation:${installation.id}`;
+    } else if (token.split(".").length === 3) {
       subject = await oidcIdentity(token, repository, configured.oidc, env.PUBLIC_ORIGIN);
     } else {
       const repo = await github(`/repos/${repository}`, token);
@@ -188,7 +208,7 @@ export async function exchangeGithub(request: Request, env: Env): Promise<Respon
       }
       subject = `github-exchange:${user.id}`;
     }
-    const scopes = [SCOPE_READ, SCOPE_WRITE, ...(configured.import === true ? [SCOPE_IMPORT] : [])];
+    const scopes = appRead ? [SCOPE_READ] : [SCOPE_READ, SCOPE_WRITE, ...(configured.import === true ? [SCOPE_IMPORT] : [])];
     const expiresAt = githubCredentialExpiry(Date.now());
     const key = await reusableKey(env.COOKIE_ENCRYPTION_KEY,
       JSON.stringify(["github-exchange-v1", env.TEAM, repository, tracker, subject, scopes, expiresAt]));

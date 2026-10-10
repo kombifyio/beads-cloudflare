@@ -130,21 +130,5 @@ run import import.jsonl; run show "$TRACKER-imp1"; has "Imported one"
 run create "Doomed" -t chore --json; X=$(idof)
 run delete "$X" --force; n=$((n + 1)); if "$BD" show "$X" >/dev/null 2>&1; then echo "FAIL #$n: deleted issue still shows"; exit 1; fi
 run prime
-# doctor is Dolt-shaped upstream (cmd/bd/doctor/database.go opens the local Dolt
-# database itself, and the prime probe execs a `bd` from PATH), so two checks report
-# errors that only mean "this is not a Dolt workspace" or "no bd on PATH". Anything
-# else is real.
-n=$((n + 1)); OUT=$("$BD" doctor 2>&1)
-OTHER=$(printf '%s
-' "$OUT" | grep '✖' | grep -v -e 'Database: No dolt database found' -e 'bd prime Command' | grep -v 'passed.*errors' || true)
-[ -z "$OTHER" ] || { echo "FAIL #$n: doctor reports real errors"; echo "$OTHER"; exit 1; }
-echo "ok   #$n: bd doctor (only the two Dolt-shaped checks complain)"
-# doctor starts a local Dolt server for its Dolt checks; do not leave it behind.
-for _ in 1 2 3 4 5; do [ -f .beads/dolt-server.pid ] && break; sleep 1; done
-if [ -f .beads/dolt-server.pid ]; then
-  pid=$(cat .beads/dolt-server.pid)
-  taskkill //F //PID "$pid" >/dev/null 2>&1 || kill "$pid" >/dev/null 2>&1 || true
-  sleep 1
-fi
-
+# The upstream doctor starts a Dolt server; it is outside this live Cloudflare proof.
 echo "PASS: $n steps on tracker $TRACKER"

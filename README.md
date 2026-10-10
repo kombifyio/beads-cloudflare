@@ -19,7 +19,7 @@ npx --yes github:kombifyio/beads-cloudflare setup
 It deploys the store into your Cloudflare account, creates an agent key, installs the matching `bd`, writes the
 two small files that point the repository at its tracker, and checks authenticated tracker context and the binary.
 It prints `beads-cloudflare: ready. Use bd as usual.` only when that passes; any
-problem is found during setup and reported with the exact fix. Running it again changes nothing.
+problem is reported with a suggested fix. Running setup again preserves existing tracker data, credentials and authorization policy while redeploying the selected package.
 
 Every step in your Cloudflare account (the KV namespace, the secrets, reading back an existing Worker, the deploy) runs
 through `cf`; the tool never calls Wrangler itself. `cf deploy` runs the Wrangler pinned in this package internally, which
@@ -134,8 +134,8 @@ probe requiring a separate key allowed on scratch trackers; a repository-scoped 
 
 ## What this is
 
-One Worker serves a team's trackers over the Beads `bd serve` HTTP contract and over MCP, with every tracker kept
-in a SQLite-backed Durable Object. The repository holds both halves, released together under one version:
+One Worker serves a team's trackers over the Beads `bd serve` HTTP contract and over MCP. A team's trackers share
+one SQLite-backed Durable Object, with tracker-scoped data and access checks. The repository holds both halves, released together under one version:
 
 - the **store**: a TypeScript Worker in `src/`, a declared profile of upstream's `/v0` contract;
 - **bd**: a Go storage backend (module `github.com/kombifyio/beads-cloudflare/bd` in `bd/`) that is compiled into
@@ -148,12 +148,12 @@ both versions and the command that fixes it ([`docs/compatibility.md`](docs/comp
 
 ## Status
 
-- The core loop (create, update, claim, close, ready work, dependencies, comments, memories, history) works over
-  HTTP, MCP and `bd`, and is covered by black-box tests that run in workerd. Every pull request builds `bd` from the
-  tree, runs the Worker locally and runs the everyday-commands script and the upstream conformance suite against it.
-- **Upstream's conformance suite is not fully green**: 52 of its 60 portable checks pass, and CI holds that baseline
-  (see [`docs/bd-backend.md`](docs/bd-backend.md#conformance) for each remaining failure). What the store implements and
-  where it deviates is declared in [`docs/profile.md`](docs/profile.md).
+- The core loop covers create, update, claim, close, ready work, dependencies, comments, memories and history over
+  HTTP, MCP and `bd`. Source CI checks types, generated contracts and database-free regressions. Release publication
+  separately checks the native client against its exact hosted Worker using scoped test credentials.
+- **Upstream's conformance suite is not fully green.** The release gate permits only documented named deviations;
+  a passing test count alone is insufficient. See [`docs/bd-backend.md`](docs/bd-backend.md#conformance) and
+  [`docs/artifacts.md`](docs/artifacts.md) for the scope and evidence. This is a declared profile, not full upstream parity.
 - **The MCP OAuth sign-in path (a person signing in through a browser via Cloudflare Access) has not been verified
   end to end.** The tests mint OAuth tokens through the provider's own API and never drive a real Access login. Agent
   API keys are the verified path for unattended agents, and setup does not depend on sign-in.
@@ -289,11 +289,11 @@ files by hand; run `join` again instead. How `bd` finds its credential, what it 
 
 ## Build bd yourself
 
-The release binaries are built with one script that clones an upstream Beads tag, adds one blank import and builds
-CGO-free; nothing in upstream is patched:
+The release binaries use the pinned upstream source, the Cloudflare backend import and a checksum-verified build
+overlay. The exact inputs and distributed license material are described in [artifact builds](docs/artifacts.md).
 
 ```sh
-bash scripts/build-bd.sh v1.3.1 ./bd
+bash scripts/build-bd.sh v1.3.1 ./dist/bd
 ```
 
 Pass such a binary to `join` with `--bd-from <path>`. The `bd/` module is also importable on its own, as
@@ -304,7 +304,7 @@ every release carries both the plain tag `vX.Y.Z` and `bd/vX.Y.Z` on the same co
 
 `POST /t/{tracker}/v0/beads/issues:import` takes records with their history intact: author, timestamps, leases, comments
 and edges. It needs an agent key with the `beads:import` scope (`node scripts/keys.mjs create migrate --import`).
-`replace` mode makes the tracker equal to the batch; `merge` mode follows upstream's `ImportBatch` and can be sent with
+`replace` mode replaces the supplied records; it does not delete records absent from the batch. `merge` mode follows upstream's `ImportBatch` and can be sent with
 plain `beads:write`. `issues:export` and `dependencies:export` read a tracker back page by page, so a migration can be
 checked by exporting and comparing. The request shapes, modes and what a merge does per record are in
 [`docs/profile.md`](docs/profile.md), and the operator view of a tracker's issue counts is `GET /admin/trackers`.
@@ -318,25 +318,17 @@ of `label_regex`) and the extensions are declared in [`docs/profile.md`](docs/pr
 ## Development
 
 ```sh
-pnpm install
-cp .dev.vars.example .dev.vars   # fill in the Access client id and secret and a cookie key, or leave them empty
-pnpm dev                         # http://localhost:8788
-```
-
-`.dev.vars` overrides the template's values for local runs. The Access app must have `http://localhost:8788/callback`
-registered as a redirect URI if you test sign-in locally.
-
-```sh
+pnpm install --frozen-lockfile
 pnpm gen          # regenerate src/generated from the vendored spec
-pnpm typecheck    # wrangler types + tsc (development and tests stay on Wrangler; see docs/cloudflare-cli.md)
-pnpm test         # vitest in workerd (@cloudflare/vitest-pool-workers)
-pnpm test:cli     # the setup tool's pure parts
+pnpm typecheck    # generate Worker types and run tsc; no database
+pnpm test:cli     # setup command regressions; no database
 (cd bd && go vet ./... && go test ./...)
-bash scripts/pair-proof.sh   # build bd, run the Worker locally, run the smoke script and the conformance suite
 ```
 
-After editing `VERSION`, run `pnpm version:sync`. The tests mint OAuth tokens through the provider's own API and agent keys
-through the real admin endpoint, so no browser or Access is involved.
+Database behavior must be exercised against an explicitly authorized hosted test store with scoped test identities.
+Do not run the historical local database suite (`pnpm test`) as a release proof. See [CONTRIBUTING.md](CONTRIBUTING.md)
+and [artifact verification](docs/artifacts.md) for the supported boundaries. Release preparation owns `VERSION`;
+`pnpm version:sync --check` verifies its projections without changing it.
 
 | Path | What |
 |---|---|
@@ -368,3 +360,7 @@ through the real admin endpoint, so no browser or Access is involved.
 
 MIT, copyright Kombiverse Labs. The vendored spec is MIT licensed by the Beads contributors; see
 `spec/upstream/SOURCE.md`.
+
+For installation help and bugs, use [public issues](https://github.com/kombifyio/beads-cloudflare/issues).
+See [SECURITY.md](SECURITY.md) for private vulnerability reporting, [CONTRIBUTING.md](CONTRIBUTING.md) for changes,
+and [operations and recovery](docs/operations.md) before relying on a store for important work.

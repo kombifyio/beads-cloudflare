@@ -94,9 +94,11 @@ export async function idCandidates(
 ): Promise<string[]> {
   const count = one<{ n: number }>(sql, "SELECT COUNT(*) AS n FROM issues WHERE tracker = ?1 AND id NOT LIKE '%.%'", tracker)?.n ?? 0;
   const nanos = BigInt(Date.parse(now)) * 1_000_000n;
+  // The configured prefix, not the tracker name: a workspace migrated with its own prefix keeps minting it.
+  const prefix = issuePrefix(sql, tracker);
   const out: string[] = [];
   for (let length = adaptiveLength(count); length <= 8; length++) {
-    for (let nonce = item * 10; nonce < item * 10 + 10; nonce++) out.push(await hashId(tracker, title, description, actor, nanos, length, nonce));
+    for (let nonce = item * 10; nonce < item * 10 + 10; nonce++) out.push(await hashId(prefix, title, description, actor, nanos, length, nonce));
   }
   return out;
 }

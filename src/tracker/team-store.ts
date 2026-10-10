@@ -12,7 +12,7 @@ import { forbiddenTracker, Refusal, refuse, problemOut } from "./problem";
 import type { Out } from "./problem";
 import { countReady, listReady, type ReadyFilter } from "./ready";
 import { migrateColumns, normalizeRows, SCHEMA, SCHEMA_VERSION } from "./schema";
-import { customStatusNames, customStatusesDetailed, customTypeNames, getConfig, infraTypes, listSettings, setConfig, setSetting, settingJson, unsetSetting } from "./config";
+import { customStatusNames, customStatusesDetailed, customTypeNames, exportSettings, getConfig, infraTypes, listSettings, setConfig, setSetting, settingJson, unsetSetting } from "./config";
 import { countIssues, getStats } from "./counts";
 import { applyBatch, batchCloseIssues, batchCreateIssues } from "./batch";
 import { countDependencyEdges, getDependencyTree, listBlockingAnnotations, listDependencies, listDependencyCycles, listRelatedIssues } from "./graph";
@@ -21,6 +21,8 @@ import { exportDependencies, exportIssues } from "./export";
 import { compareAndSetMetadata, deleteIssues, sweepIssues } from "./maintenance";
 import { queryIssues } from "./query";
 import { isTrackerId, nowIso, safeJson, setOwn, type Json } from "./util";
+import { advanceTrackerRevision, trackerRevision } from "./revision";
+import { contextFor } from "./context";
 
 export type WriteOp =
   | "createIssue" | "updateIssue" | "closeIssue" | "reopenIssue" | "claimIssue" | "releaseIssue" | "claimNextIssue"
@@ -31,7 +33,7 @@ export type WriteOp =
 
 export type ReadOp =
   | "getIssue" | "listIssues" | "listReadyWork" | "countReadyWork" | "listMemories" | "getMemory" | "listEvents"
-  | "getSetting" | "listSettings" | "getCustomStatuses" | "getCustomStatusesDetailed" | "getCustomTypes" | "getInfraTypes"
+  | "getSetting" | "listSettings" | "exportSettings" | "getCustomStatuses" | "getCustomStatusesDetailed" | "getCustomTypes" | "getInfraTypes"
   | "getStats" | "countIssues" | "queryIssues" | "listDependencies" | "countDependencyEdges" | "listBlockingAnnotations"
   | "getDependencyTree" | "listDependencyCycles" | "listRelatedIssues" | "exportIssues" | "exportDependencies";
 
@@ -157,6 +159,12 @@ export class TeamStore extends DurableObject<Env> {
     return projectIdOf(this.sql, tracker);
   }
 
+  /** Project identity and revision are read synchronously from the same tracker state. */
+  contextOf(tracker: string) {
+    if (!isTrackerId(tracker)) throw refuse("invalid_argument", "invalid tracker");
+    return contextFor(tracker, projectIdOf(this.sql, tracker), trackerRevision(this.sql, tracker));
+  }
+
   /** Issue counts per tracker and status, for an operator checking a migration. */
   trackerSummary(): { tracker: string; issues: number; by_status: Record<string, number>; memories: number; settings: number }[] {
     const out = new Map<string, { tracker: string; issues: number; by_status: Record<string, number>; memories: number; settings: number }>();
@@ -208,6 +216,7 @@ export class TeamStore extends DurableObject<Env> {
       case "listEvents": return listEvents(sql, tracker, call.since, call.limit);
       case "getSetting": return { status: 200, body: settingJson(call.id ?? "", getConfig(sql, tracker, call.id ?? "")) };
       case "listSettings": return { status: 200, body: listSettings(sql, tracker) };
+      case "exportSettings": return { status: 200, body: exportSettings(sql, tracker, call.params as { cursor?: string; limit?: number }) };
       case "getStats": return getStats(sql, tracker, call.params as never, nowIso());
       case "countIssues": return countIssues(sql, tracker, call.params as never);
       case "queryIssues": return queryIssues(sql, tracker, call.params as never, new Date());
@@ -255,6 +264,12 @@ export class TeamStore extends DurableObject<Env> {
 
     const ctx: Ctx = { sql: this.sql, tracker: call.tracker, actor: principal.email, agent: call.agent, preserveProvenance: call.preserveProvenance, now };
     const out = this.dispatch(op, ctx, call, candidates);
+    if (out.status < 400) {
+      const revision = advanceTrackerRevision(this.sql, call.tracker);
+      if (op === "importRecords" && call.body?.restore_guard !== undefined) {
+        out.body = { ...(out.body as Json), x_mutation_revision: revision };
+      }
+    }
 
     if (idem) {
       this.sql.exec(

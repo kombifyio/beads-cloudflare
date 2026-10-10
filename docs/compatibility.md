@@ -75,5 +75,9 @@ the update line above instead of failing in some later request.
 
 ## The setup tool
 
-`npx github:kombifyio/beads-cloudflare doctor` applies the same rules and runs a
-create, read, close and delete round trip in a scratch tracker. See [`SETUP.md`](../SETUP.md).
+`npx github:kombifyio/beads-cloudflare doctor` checks the actual first `bd` on PATH,
+reads authenticated tracker context and runs `bd --readonly ready --json`. The binary
+performs its full compatibility handshake, including required capabilities; a failed
+read fails readiness. Default doctor does not write tracker records. `--scratch`
+explicitly opts into a create, read, close and delete round trip with a credential
+authorized for scratch trackers. See [`SETUP.md`](../SETUP.md).

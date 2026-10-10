@@ -143,7 +143,8 @@ and a base36 digest of `title|description|actor|createdAtUnixNano|nonce`, with t
 birthday bound over the number of existing ids (3 to 8 characters, collision probability at most 0.25),
 retrying nonces 0..9 then longer lengths. Children of a parent get `<parent>.<N>` with `N` one above the
 highest existing child number. An explicit id must start with `<prefix>-` unless `force_id_prefix`
-(`create_only_guard.go:13-34`). The prefix on this server is the tracker id.
+(`create_only_guard.go:13-34`). The prefix is the tracker's `issue_prefix` setting without one trailing dash,
+as upstream `ReadConfigPrefix` reads it; a tracker without the setting uses its tracker id.
 
 ## Blocked (`is_blocked`) and what `listIssues` shows
 

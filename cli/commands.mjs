@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { redact, registerSecret } from "./output.mjs";
 import { ambientBeadsStoreTrusted, beadsTokenEnvValid, credentialFilePrivate, credentialFresh, exchangeOrigin, githubCredentialKey, readGithubCredentials, repositoryValid, resolveGithubCredential, updateCredentialFile } from "./github-auth.mjs";
 import {
   MIN_NODE_MAJOR,
@@ -54,10 +55,10 @@ class Report {
     this.failures = 0;
   }
   #row(tag, text) {
-    console.log(`  ${tag.padEnd(7)} ${text}`);
+    console.log(`  ${tag.padEnd(7)} ${redact(text)}`);
   }
   heading(text) {
-    console.log(`\n${text}`);
+    console.log(`\n${redact(text)}`);
   }
   ok(label, detail = "") {
     this.#row("ok", detail ? `${label}: ${detail}` : label);
@@ -96,7 +97,7 @@ function readJsonFile(path) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    throw new Error(`${path} is not valid JSON (${error.message}); fix or delete it`);
+    throw new Error(`${path} is not valid JSON; fix or delete it`);
   }
 }
 
@@ -220,6 +221,7 @@ function cfPages(args, what) {
 }
 
 async function request(method, url, { token, body, timeoutMs = 20000 } = {}) {
+  registerSecret(token);
   // A read may meet a connection the other side already closed; it is safe to ask again.
   let answer;
   for (let attempt = 1; attempt <= (method === "GET" ? 3 : 1); attempt++) {
@@ -290,16 +292,25 @@ async function checkCloudflareCli(report, { allowOutdated }) {
   const install = "npm install -g cf@latest";
   const again = `then run: ${NPX} setup`;
   let version;
+  let selected;
+  const checked = new Set();
   for (const launcher of cfLaunchersOnPath()) {
+    const identity = JSON.stringify([launcher.command, launcher.prefix]);
+    if (checked.has(identity)) continue;
+    checked.add(identity);
     cfLauncher = launcher;
     const said = cf(["--version"], { timeout: 60000 });
     const line = `${said.stdout}\n${said.stderr}`.split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
     if (said.status === 0 && compareSemver(line, line) !== null) {
-      version = line;
-      break;
+      if (!version || compareSemver(line, version) > 0) {
+        version = line;
+        selected = launcher;
+      }
     }
-    cfLauncher = undefined;
   }
+  // npx prepends its bundled cf to PATH. A current host installation must still
+  // repair an older package pin without requiring the package itself to update.
+  cfLauncher = selected;
   if (!version) {
     report.fail("cf", "the Cloudflare CLI (`cf`) was not found on PATH", [`install it: ${install}`, again]);
     return undefined;
@@ -401,7 +412,7 @@ function ensureKv(report, name) {
 
 /**
  * What the account already has under this Worker name: { exists, origin, deployed, secrets } or { problem }.
- * An existing Worker is read back through cf: its newest version carries the plain-text settings and the KV binding,
+ * An existing Worker is read back through cf: its active version carries the plain-text settings and the KV binding,
  * and the secret names say which secrets are in place (their values cannot be read, and are never needed).
  */
 function inspectWorker(name) {
@@ -410,9 +421,17 @@ function inspectWorker(name) {
   const worker = listed.items.find((entry) => entry?.name === name);
   if (!worker) return { exists: false, secrets: new Set() };
   const origin = typeof worker.subdomain?.url === "string" ? worker.subdomain.url.replace(/\/+$/, "") : undefined;
-  const versions = cf(["workers", "versions", "list", "--worker-id", name]);
-  if (versions.status !== 0) return { problem: `\`cf workers versions list\` failed: ${cfProblem(versions)}` };
-  const deployed = readDeployedSettings(parseCfJson(versions.stdout));
+  const deployments = cf(["workers", "deployments", "list", "--worker", name, "--per-page", "1"]);
+  if (deployments.status !== 0) return { problem: `\`cf workers deployments list\` failed: ${cfProblem(deployments)}` };
+  const latest = parseCfJson(deployments.stdout)?.deployments?.[0];
+  const active = Array.isArray(latest?.versions) ? latest.versions.filter((version) => version?.percentage > 0) : [];
+  if (active.length !== 1 || active[0].percentage !== 100 || typeof active[0].version_id !== "string") {
+    return { problem: "no single version serves 100% of this Worker; complete its rollout before setup can preserve its authorization" };
+  }
+  const version = cf(["workers", "versions", "get", active[0].version_id, "--worker-id", name]);
+  if (version.status !== 0) return { problem: `\`cf workers versions get\` failed: ${cfProblem(version)}` };
+  const deployed = readDeployedSettings(parseCfJson(version.stdout));
+  if (deployed.missing.includes("bindings") || deployed.githubRepositories === undefined) return { problem: "the deployed Worker's GitHub authorization bindings could not be read; refusing to replace unknown authorization" };
   const secrets = cf(["workers", "secrets", "list", "--worker", name]);
   if (secrets.status !== 0) return { problem: `\`cf workers secrets list\` failed: ${cfProblem(secrets)}` };
   const names = readCfList(secrets.stdout, "cf workers secrets list");
@@ -473,7 +492,7 @@ function deploy(report, { name, env, secrets }) {
     const args = ["deploy", "--message", `beads-cloudflare ${CLI_VERSION} setup`];
     if (Object.keys(secrets).length) {
       const file = join(project.dir, "secrets.json");
-      writeFileSync(file, JSON.stringify(secrets), { mode: 0o600 });
+      writePrivate(file, JSON.stringify(secrets));
       args.push("--secrets-file", file);
     }
     const result = cf(args, { cwd: project.dir, env: deployEnv({ name, ...env }), timeout: 600000 });
@@ -1109,7 +1128,18 @@ async function selfTest(report, { cwd, bin, store, dryRun = false, scratch = fal
   const tracker = process.env.BEADS_CLOUDFLARE_TRACKER ?? repo.tracker;
   if (!base || trackerProblem(tracker)) { report.fail("repository", "store and tracker are not configured", `${NPX} join <store url> --tracker <id>`); return; }
   if (found && foreignWorkspaceReason(found.dir)) { report.fail("repository", foreignWorkspaceReason(found.dir), "credentials is the auth-only command for an existing Dolt workspace"); return; }
-  if (dryRun) { report.would("resolve credentials and read this tracker's context; no tracker records are written"); return; }
+  if (dryRun) { report.would("check the first bd on PATH, resolve credentials, read tracker context and run bd --readonly ready --json; no tracker records are written"); return; }
+  const installDir = defaultBinDir(process.platform, process.env, homedir());
+  const bd = bin ?? findOnPath()[0];
+  if (!bd || isShim(bd)) {
+    report.fail("bd on PATH", bd ? `the first bd is a command shim: ${bd}` : "bd is not found", pathFix(installDir, process.platform));
+    return;
+  }
+  const reported = versionOf(bd);
+  if (!reported?.includes("+cloudflare.")) {
+    report.fail("bd on PATH", `${bd} is not a Cloudflare-capable bd`, pathFix(installDir, process.platform));
+    return;
+  }
   let credential = effectiveCredential({ repoDir: found?.dir, base, tokenEnv: repo.token_env });
   if (!credential && repo.github_repository) {
     try { const entry = await portableGithubCredential({ base, repository: repo.github_repository, tracker }); credential = { key: entry.token, source: "GitHub repository exchange" }; }
@@ -1119,13 +1149,34 @@ async function selfTest(report, { cwd, bin, store, dryRun = false, scratch = fal
   const context = await readContext(base, credential.key, tracker);
   if (context.problem) { report.fail("tracker context", context.problem, "check the credential's tracker scope and store address"); return; }
   report.ok("tracker context", `${tracker} is readable; store ${context.doc.x_store_version ?? "unknown"}`);
-  const installDir = defaultBinDir(process.platform, process.env, homedir());
-  const candidates = bin ? [bin] : [...findOnPath(), join(installDir, binaryName())].filter((path) => existsSync(path));
-  const reported = candidates.map((path) => versionOf(path)).find((version) => version?.includes("+cloudflare."));
-  if (!reported) { report.fail("bd", "no Cloudflare-capable bd found", `${NPX} bootstrap`); return; }
   const version = backendVersionOf(reported);
   if (context.doc.x_min_client_version && (!version || compareVersions(version, context.doc.x_min_client_version) < 0)) { report.fail("versions", "the installed backend is older than the store's minimum", `${NPX} bootstrap`); return; }
   report.ok("bd", firstLine(reported));
+  // --store also works outside a clone: only connection metadata is temporary,
+  // while the read addresses the configured tracker on the existing store.
+  let temporary;
+  try {
+    let readDir = found?.dir;
+    if (!readDir) {
+      temporary = mkdtempSync(join(tmpdir(), "beads-readiness-"));
+      const beads = join(temporary, ".beads");
+      mkdirSync(beads);
+      writeFileSync(join(beads, "metadata.json"), JSON.stringify({ backend: "cloudflare" }));
+      readDir = temporary;
+    }
+    const read = run(bd, ["--readonly", "ready", "--json"], { cwd: readDir, cleanEnv: scratchEnv({ base, tracker, tokenEnv: repo.token_env, credential }), timeout: 60000 });
+    if (read.status !== 0) {
+      report.fail("bd tracker read", whyBdFailed(read), "fix the binary's tracker/credential error above, then run doctor again");
+      return;
+    }
+    try { JSON.parse(read.stdout); } catch {
+      report.fail("bd tracker read", "bd ready did not return JSON", "install the matching bd with bootstrap, then run doctor again");
+      return;
+    }
+    report.ok("bd tracker read", "bd --readonly ready --json succeeded; the binary checked the store compatibility");
+  } finally {
+    if (temporary) rmSync(temporary, { recursive: true, force: true });
+  }
   report.info("Tracker writes were not exercised. --scratch explicitly runs a write round trip and needs a key authorized for scratch trackers.");
 }
 
@@ -1143,7 +1194,7 @@ function optionProblems(flag) {
     const parsed = normalizeStoreUrl(flag[name]);
     if (parsed.error) out.push([`--${name}`, parsed.error]);
   }
-  for (const name of ["bin-dir", "bd-from", "bd-path"]) if (flag[name] !== undefined) check(`--${name}`, pathProblem(flag[name]));
+  for (const name of ["bin-dir", "bd-from", "bd-path", "github-policy"]) if (flag[name] !== undefined) check(`--${name}`, pathProblem(flag[name]));
   if (flag["admin-email"]) check("--admin-email", emailListProblem(flag["admin-email"]));
   if (flag["access-issuer"]) check("--access-issuer", httpsUrlProblem(flag["access-issuer"]));
   if (flag.token !== undefined && !/^[\x21-\x7e]+$/.test(flag.token)) out.push(["--token", "an agent key has no spaces or control characters"]);
@@ -1263,7 +1314,7 @@ export async function joinCommand(flag, positional, { report: shared, token: han
   if (!files) return done();
 
   if (dryRun) {
-    report.would("run the self-test: create, read back, close and delete an issue in a scratch tracker");
+    report.would(flag.scratch ? "run the self-test: create, read back, close and delete an issue in a scratch tracker" : "check PATH and run the read-only tracker context and bd ready checks");
     return done();
   }
   report.heading("Checking the installation");
@@ -1302,6 +1353,19 @@ export async function setupCommand(flag, positional) {
     for (const [what, why] of problems) report.fail(what, why, "correct the option and run the command again");
     return report.finish("setup");
   }
+  let githubRepositories = process.env.BEADS_GITHUB_REPOSITORIES;
+  if (flag["github-policy"] || githubRepositories !== undefined) {
+    try {
+      const input = flag["github-policy"] ? readFileSync(resolve(flag["github-policy"]), "utf8") : githubRepositories;
+      const policy = JSON.parse(input);
+      if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new Error("expected a JSON object");
+      githubRepositories = JSON.stringify(policy);
+      if (Buffer.byteLength(githubRepositories, "utf8") > 5120) throw new Error("policy exceeds Cloudflare's 5120-byte text binding limit");
+    } catch (error) {
+      report.fail("GitHub policy", "could not read a JSON object within the 5120-byte binding limit", "use --github-policy <non-secret JSON file> (an empty object explicitly disables repository exchange)");
+      return report.finish("setup");
+    }
+  }
   if (!(await checkNetwork(report))) return report.finish("setup");
   const login = dryRun ? { accountId: process.env.CLOUDFLARE_ACCOUNT_ID } : await checkCloudflareCli(report, { allowOutdated: Boolean(flag["allow-outdated-cf"]) });
   if (dryRun) report.would("check that cf is installed, on its newest release (npm registry) and signed in: cf --version, cf auth whoami");
@@ -1317,7 +1381,7 @@ export async function setupCommand(flag, positional) {
   const statePath = storeStatePath(name);
   let state = readJsonFile(statePath) ?? {};
   if (dryRun) {
-    report.would(`read back an existing Worker "${name}" with: cf workers list, cf workers versions list, cf workers secrets list`);
+    report.would(`read back an existing Worker "${name}" with: cf workers list, cf workers deployments list, cf workers versions get <active version>, cf workers secrets list`);
     report.would(`create or reuse the KV namespace ${name}-oauth with: cf kv namespaces list, cf kv namespaces create --title ${name}-oauth`);
     report.would(`generate the admin token and cookie key where the Worker has none (kept in ${statePath}, readable by you only)`);
     report.would(`deploy the Worker "${name}" with: cf deploy --secrets-file <temporary file>   (project: ${join(PACKAGE_ROOT, "cloudflare.config.ts")}${flag.origin ? `, public origin ${flag.origin}` : ", then set its public origin from the deployed address"})`);
@@ -1353,6 +1417,8 @@ export async function setupCommand(flag, positional) {
   const settings = {
     admin_emails: flag["admin-email"] ?? found.adminEmails ?? prior?.admin_emails ?? "",
     access_issuer: flag["no-sign-in"] ? "" : (flag["access-issuer"] ?? found.accessIssuer ?? prior?.access_issuer ?? ""),
+    github_repositories: githubRepositories ?? found.githubRepositories ?? prior?.github_repositories ?? "{}",
+    github_read_app: process.env.BEADS_GITHUB_READ_APP ?? (existing.exists ? (found.githubReadApp ?? "") : (prior?.github_read_app ?? "")),
   };
 
   // Secrets the Worker already has are left alone (a deploy keeps them); only missing ones are generated and uploaded.
@@ -1360,6 +1426,7 @@ export async function setupCommand(flag, positional) {
   for (const [secret, field] of [["COOKIE_ENCRYPTION_KEY", "cookie_key"], ["ADMIN_TOKEN", "admin_token"]]) {
     if (existing.secrets.has(secret)) continue;
     state[field] ??= randomBytes(32).toString("base64url");
+    registerSecret(state[field]);
     secrets[secret] = state[field];
   }
   const firstSecrets = "ADMIN_TOKEN" in secrets;
@@ -1375,7 +1442,7 @@ export async function setupCommand(flag, positional) {
 
   const readBack = found.origin && !PLACEHOLDER_ORIGIN.test(found.origin) ? found.origin.replace(/\/+$/, "") : undefined;
   const knownOrigin = flag.origin?.replace(/\/+$/, "") ?? state.origin ?? readBack;
-  const settingsFor = (origin) => ({ kvId, origin, adminEmails: settings.admin_emails, accessIssuer: settings.access_issuer, accessSecrets, accountId: login.accountId });
+  const settingsFor = (origin) => ({ kvId, origin, adminEmails: settings.admin_emails, accessIssuer: settings.access_issuer, accessSecrets, githubRepositories: settings.github_repositories, githubReadApp: settings.github_read_app, accountId: login.accountId });
   const first = deploy(report, { name, env: settingsFor(knownOrigin ?? `https://${name}.example.workers.dev`), secrets });
   if (!first) return report.finish("setup");
   const origin = knownOrigin ?? workersDevOrigin(name) ?? new RegExp(`https://${name}\\.[\\w-]+\\.workers\\.dev`).exec(first.output)?.[0];
@@ -1423,11 +1490,9 @@ export async function setupCommand(flag, positional) {
     }
   }
   if (firstSecrets || newKey) {
-    console.log("\n  ----------------------------------------------------------------------------------");
-    if (firstSecrets) console.log(`  NEW ADMIN TOKEN (shown once; it manages keys on ${origin}/admin; also kept in ${statePath}):\n    ${state.admin_token}`);
-    if (newKey) console.log(`  NEW AGENT KEY (shown once; also stored in ${credentialsPath()}):\n    ${key}`);
-    console.log("  Keep both out of git and chat. The agent key is already in place for bd; you do not need to copy it.");
-    console.log("  ----------------------------------------------------------------------------------");
+    if (firstSecrets) report.ok("admin token", `created and kept in ${statePath} (readable by you only)`);
+    if (newKey) report.ok("agent key", `created and kept in ${credentialsPath()} (readable by you only)`);
+    report.info("Credentials are already in custody for bd. Their values are never printed by setup.");
   } else report.ok("agent key", `already in ${credentialsPath()}`);
   report.info(settings.access_issuer ? "sign-in: configured (Cloudflare Access)" : "sign-in: off, agent keys only (README, \"Configure sign-in\", turns it on later)");
 

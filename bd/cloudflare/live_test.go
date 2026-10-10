@@ -3,7 +3,9 @@ package cloudflare_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
+	"sync"
 	"testing"
 
 	beadsbackend "github.com/steveyegge/beads/backend"
@@ -82,6 +84,33 @@ func TestLiveConformance(t *testing.T) {
 // OverTheCapAnswersTheTypedRefusal/cap3") blow that budget, which the server
 // answers as an unknown route.
 func perSubtestTracker(t *testing.T, base string) string {
+	if encoded := os.Getenv("PAIR_TEST_POOL"); encoded != "" {
+		trackerPool.Lock()
+		defer trackerPool.Unlock()
+		if tracker := trackerPool.used[t.Name()]; tracker != "" {
+			return tracker
+		}
+		var pool []string
+		if json.Unmarshal([]byte(encoded), &pool) != nil || len(pool) < 3 || len(trackerPool.used)+2 >= len(pool) {
+			t.Fatal("invalid or exhausted finite shared-test tracker pool")
+		}
+		tracker := pool[len(trackerPool.used)+2]
+		if len(tracker) > cloudflare.MaxTrackerID || len(tracker) < 8 || tracker[:8] != "cf-test-" {
+			t.Fatal("live conformance pool contains a non-test tracker")
+		}
+		file, err := os.OpenFile(os.Getenv("PAIR_USED_TRACKERS"), os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatalf("record test tracker for cleanup: %v", err)
+		}
+		line, _ := json.Marshal(tracker)
+		_, err = file.Write(append(line, '\n'))
+		closeErr := file.Close()
+		if err != nil || closeErr != nil {
+			t.Fatal("record test tracker for cleanup failed")
+		}
+		trackerPool.used[t.Name()] = tracker
+		return tracker
+	}
 	sum := sha256.Sum256([]byte(t.Name()))
 	suffix := hex.EncodeToString(sum[:6])
 	room := cloudflare.MaxTrackerID - len(base) - 1
@@ -90,3 +119,8 @@ func perSubtestTracker(t *testing.T, base string) string {
 	}
 	return base + "-" + suffix
 }
+
+var trackerPool = struct {
+	sync.Mutex
+	used map[string]string
+}{used: make(map[string]string)}

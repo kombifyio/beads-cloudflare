@@ -2,10 +2,10 @@
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { trackerAllowed, type Principal } from "../auth/scopes";
-import { contextFor } from "../tracker/context";
 import { forbiddenTracker, type Out } from "../tracker/problem";
 import type { Call, ReadOp, TeamStore, WriteOp } from "../tracker/team-store";
 import { canonicalJson, MAX_TRACKER, sha256Hex, TRACKER_ID, type Json } from "../tracker/util";
+import { STORE_VERSION } from "../version";
 
 export interface ToolDeps {
   store: DurableObjectStub<TeamStore>;
@@ -82,7 +82,7 @@ export const WRITE_TOOLS = new Set([
 const dropUndefined = (o: Json): Json => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
 export function buildServer(deps: ToolDeps): McpServer {
-  const server = new McpServer({ name: "beads-cloudflare", version: "0.1.0" });
+  const server = new McpServer({ name: "beads-cloudflare", version: STORE_VERSION });
   const actor = deps.principal.email;
 
   const read = <S extends z.ZodRawShape>(name: string, description: string, shape: S, op: ReadOp | "context", map: (a: z.infer<z.ZodObject<S>>) => Partial<Call>) => {
@@ -92,7 +92,7 @@ export function buildServer(deps: ToolDeps): McpServer {
       async (args) => {
         const a = args as z.infer<z.ZodObject<S>> & { tracker: string };
         if (!trackerAllowed(deps.principal, a.tracker)) return resultOf(forbiddenTracker(a.tracker));
-        if (op === "context") return resultOf({ status: 200, body: contextFor(a.tracker) });
+        if (op === "context") return resultOf({ status: 200, body: await deps.store.contextOf(a.tracker) });
         return resultOf(await deps.store.read(op, { tracker: a.tracker, principal: deps.principal, agent: deps.agent, ...map(a) }));
       },
     );

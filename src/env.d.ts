@@ -8,6 +8,9 @@ declare namespace Cloudflare {
 }
 
 interface Env {
+  PORTFOLIO_ARCHIVE?: {source: 'dolt'; label: string; points: import('./dashboard/data').Snapshot[]};
+  PORTFOLIO_TITLE?: string;
+  PORTFOLIO_REPOSITORIES?: string;
   ACCESS_CLIENT_ID?: string;
   ACCESS_CLIENT_SECRET?: string;
 }

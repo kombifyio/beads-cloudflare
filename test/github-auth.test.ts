@@ -7,18 +7,20 @@ import { exchangeGithub, githubCredentialExpiry } from "../src/auth/github";
 
 const repository = "example/project";
 const githubToken = "github-user-test-token";
+let githubBearer = githubToken;
 const configured = JSON.stringify({ [repository]: { trackers: ["github"] } });
 
 const replies: { origin: string; path: string; status: number; body: unknown; headers?: Record<string, string> }[] = [];
 // Current pool runs the handler and outbound fetch in this workerd isolate; Vitest mocks are supported.
 beforeEach(() => {
   replies.length = 0;
+  githubBearer = githubToken;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
     const next = replies.shift();
     if (!next || url.origin !== next.origin || url.pathname !== next.path) throw new Error("Unexpected outbound request");
-    if (url.origin === "https://api.github.com") expect(request.headers.get("Authorization")).toBe(`Bearer ${githubToken}`);
+    if (url.origin === "https://api.github.com") expect(request.headers.get("Authorization")).toBe(`Bearer ${githubBearer}`);
     else expect(request.headers.get("Authorization")).toBeNull();
     expect(request.redirect).toBe("manual");
     return new Response(JSON.stringify(next.body), { status: next.status, headers: { "Content-Type": "application/json", ...next.headers } });
@@ -30,8 +32,8 @@ function upstream(path: string, body: unknown, status = 200, headers?: Record<st
   for (let n = 0; n < count; n++) replies.push({ origin, path, status, body, headers });
 }
 
-async function exchange(body: unknown = { repository, tracker: "github" }, mapping = configured, token: string | null = githubToken) {
-  const bindings = { ...env, GITHUB_REPOSITORIES: mapping };
+async function exchange(body: unknown = { repository, tracker: "github" }, mapping = configured, token: string | null = githubToken, readerPolicy = "") {
+  const bindings = { ...env, GITHUB_REPOSITORIES: mapping, GITHUB_READ_APP: readerPolicy };
   return exchangeGithub(new Request("https://beads.test/auth/github", {
     method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(body),
@@ -63,6 +65,42 @@ it("exchanges verified GitHub write access for a reusable tracker-scoped credent
   expect((await call("GET", "/t/other/v0/beads/ready", credential.token)).status).toBe(403);
   expect((await call("POST", "/t/github/v0/beads/issues:import", credential.token, {})).status).toBe(403);
   expect((await call("GET", "/admin/keys", credential.token)).status).toBe(403);
+});
+
+// Sensitive boundary: App reader identity can never inherit a repository's writer/import grant.
+it("exchanges only the pinned unsuspended App installation for tracker-scoped read access", async () => {
+  githubBearer = "reader.app.jwt";
+  const appRead = JSON.stringify({ app_id: "4862598", installation_id: "12345", repositories: [repository] });
+  const mapping = JSON.stringify({ [repository]: { trackers: ["github"], import: true } });
+  const body = { repository, tracker: "github", credential_type: "github-app" };
+  const appExchange = (requestBody: unknown = body, readerPolicy = appRead) => exchange(requestBody, mapping, githubBearer, readerPolicy);
+  upstream("/app", { id: 4862598 });
+  upstream(`/repos/${repository}/installation`, { id: 12345, app_id: 4862598, suspended_at: null });
+  const response = await appExchange();
+  expect(response.status).toBe(200);
+  const credential = await response.json() as { token: string; expires_at: string };
+  expect(Date.parse(credential.expires_at) - Date.now()).toBeGreaterThan(0);
+  expect(Date.parse(credential.expires_at) - Date.now()).toBeLessThanOrEqual(3600_000);
+  expect((await call("GET", "/t/github/v0/beads/ready", credential.token)).status).toBe(200);
+  expect((await call("GET", "/t/other/v0/beads/ready", credential.token)).status).toBe(403);
+  expect((await call("POST", "/t/github/v0/beads/issues", credential.token, { actor: "reader", title: "forbidden", issue_type: "task" })).status).toBe(403);
+  expect((await call("POST", "/t/github/v0/beads/issues:import", credential.token, {})).status).toBe(403);
+  expect((await call("GET", "/admin/keys", credential.token)).status).toBe(403);
+  expect((await appExchange({ ...body, scopes: ["beads:write"] })).status).toBe(400);
+  expect((await appExchange(body, "")).status).toBe(403);
+  expect((await appExchange(body, JSON.stringify({ app_id: "4862598", installation_id: "12345", repositories: ["other/project"] }))).status).toBe(403);
+  expect((await appExchange({ ...body, tracker: "other" })).status).toBe(403);
+  upstream("/app", { id: 9876 });
+  expect((await appExchange()).status).toBe(403);
+  for (const installation of [
+    { id: 9876, app_id: 4862598, suspended_at: null },
+    { id: 12345, app_id: 9876, suspended_at: null },
+    { id: 12345, app_id: 4862598, suspended_at: "2026-10-09T00:00:00Z" },
+  ]) {
+    upstream("/app", { id: 4862598 });
+    upstream(`/repos/${repository}/installation`, installation);
+    expect((await appExchange()).status).toBe(403);
+  }
 });
 
 it("grants provenance import only when enabled in the repository's server mapping", async () => {

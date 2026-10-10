@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build bd with the Cloudflare backend: upstream bd at a release tag plus one blank
-# import of this repository's Go module (bd/). Nothing in upstream is patched.
+# import of this repository's Go module (bd/) and the declared, source-qualified
+# dependency overlay in spec/upstream/build-overlay.json. Upstream source is unchanged.
 #
 #   scripts/build-bd.sh <upstream-tag> <output-path> [module-dir]
 #
@@ -27,6 +28,11 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ADAPTER=${3:-$HERE/bd}
 UPSTREAM_REPO=${UPSTREAM_REPO:-https://github.com/gastownhall/beads.git}
 MODULE=github.com/kombifyio/beads-cloudflare/bd
+GOTOOLCHAIN=$(node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync(process.argv[1]));if(!/^go[0-9]+\.[0-9]+\.[0-9]+$/.test(p.go_toolchain))process.exit(1);console.log(p.go_toolchain)' "$HERE/spec/upstream/build-overlay.json")
+export GOTOOLCHAIN
+PINNED_TAG=$(sed -n 's/^- Tag: //p' "$HERE/spec/upstream/SOURCE.md" | tr -d '\r')
+PINNED_SHA=$(sed -n 's/^- Commit: //p' "$HERE/spec/upstream/SOURCE.md" | tr -d '\r')
+[ "$TAG" = "$PINNED_TAG" ] && [[ "$PINNED_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo "build-bd: upstream must match the declared source pin" >&2; exit 1; }
 
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 
@@ -43,6 +49,7 @@ BUILD="cloudflare.${ADAPTER_SHA:-$ADAPTER_V}"
 
 git clone --quiet --depth 1 --branch "$TAG" "$UPSTREAM_REPO" "$WORK/src"
 cd "$WORK/src"
+[ "$(git rev-parse HEAD)" = "$PINNED_SHA" ] || { echo "build-bd: upstream tag does not match the declared commit" >&2; exit 1; }
 
 # The one import. Registration is the only wiring; a workspace selects the
 # backend by name in .beads/metadata.json.
@@ -69,8 +76,10 @@ if [ -n "$adapter_go" ] && [ "$(printf '%s\n%s\n' "$upstream_go" "$adapter_go" |
 fi
 
 export GOWORK=off CGO_ENABLED=0
+node "$HERE/scripts/apply-native-overlay.mjs"
 go mod tidy >/dev/null
-go build -tags gms_pure_go \
+node "$HERE/scripts/apply-native-overlay.mjs" --verify
+go build -trimpath -buildvcs=false -tags gms_pure_go \
   -ldflags "-X main.Version=${VERSION} -X main.Build=${BUILD} -X ${MODULE}/cloudflare.Version=${ADAPTER_V}" \
   -o "$OUT" ./cmd/bd
 echo "built $OUT ($VERSION)"

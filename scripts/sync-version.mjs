@@ -14,7 +14,7 @@ if (!/^\d+\.\d+\.\d+$/.test(version)) {
 }
 
 const versionTs = `// Generated from VERSION by scripts/sync-version.mjs. Do not edit.
-export const STORE_VERSION = "${version}";
+export const STORE_VERSION = "${version}"; // x-release-please-version
 `;
 const packagePath = resolve(root, "package.json");
 const pkg = JSON.parse(readFileSync(packagePath, "utf8"));

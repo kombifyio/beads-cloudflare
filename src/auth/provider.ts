@@ -6,6 +6,7 @@ import OAuthProvider, {
 import { handleAdmin } from "../admin/endpoint";
 import { handleMcp } from "../mcp/endpoint";
 import { handleTracker } from "../http/endpoint";
+import { handlePortfolio } from "../dashboard/endpoint";
 import { resolveExternalToken } from "./external";
 import { authHandler } from "./handler";
 import { effectiveScopes, SCOPE_IMPORT, SCOPE_READ, SCOPE_WRITE, SCOPES_SUPPORTED, type Principal } from "./scopes";
@@ -22,6 +23,7 @@ export function scopeRefusal(ctx: ApiContext, needsWrite: boolean, needsImport =
 export function providerOptions(env: Env): OAuthProviderOptions<Env> {
   return {
     apiHandlers: {
+      "/portfolio/": { fetch: (request, e, ctx) => handlePortfolio(request, e, ctx as unknown as ApiContext) },
       "/mcp": { fetch: (request, e, ctx) => handleMcp(request, e, ctx as unknown as ApiContext) },
       "/t/": { fetch: (request, e, ctx) => handleTracker(request, e, ctx as unknown as ApiContext) },
       "/admin/": { fetch: (request, e, ctx) => handleAdmin(request, e, ctx as unknown as ApiContext) },

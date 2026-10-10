@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "go_toolchain": "go1.27.2",
+  "dependencies": [
+    {
+      "module": "github.com/dolthub/eventkit",
+      "version": "v0.0.0-20261005174236-b3d0f15b9905",
+      "source_repository": "https://github.com/dolthub/eventkit",
+      "source_commit": "b3d0f15b990587a309bcce5532d0c13a67ad0e01",
+      "module_sum": "h1:mJaW3SwgMI6pP176vdneMHzbwTK0/ugUIhcuoSoN0q8=",
+      "license": "Apache-2.0",
+      "license_file": "LICENSE",
+      "license_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "reason": "The upstream v1.3.1 dependency revision lacks a license grant; this publisher-licensed successor qualifies native redistribution."
+    }
+  ]
+}

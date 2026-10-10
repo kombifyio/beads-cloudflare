@@ -1,9 +1,98 @@
+Source versions below do not all correspond to public packages. See [published releases](https://github.com/kombifyio/beads-cloudflare/releases) for the available downloads.
+
 # Changelog
 
 All notable changes are documented here. Versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: minor
 versions may break). The store, `bd` and the setup tool carry one version, the `VERSION` file.
 
 ## Unreleased
+
+## 0.1.10 (2026-10-10)
+
+
+### Features
+
+* **dashboard:** add areas, ecosystem scopes and epic modules (#48) (36cdc5f)
+
+
+### Bug Fixes
+
+* harden public setup, recovery and release integrity (#49) (adebb8a)
+
+## 0.1.9 (2026-10-10)
+
+
+### Bug Fixes
+
+* preserve same-origin dashboard logout (#47) (98bff7d)
+* qualify dashboard deployment readback through propagation (#45) (f4b80ff)
+
+## 0.1.8 (2026-10-10)
+
+
+### Features
+
+* add Access-protected Beads portfolio dashboard (#43) (9cbf5c6)
+
+
+### Bug Fixes
+
+* **bootstrap:** GitHub Actions is no longer a bootstrap gap (#41) (77d39db)
+
+## 0.1.7 (2026-10-09)
+
+
+### Bug Fixes
+
+* retain existing historical identities in guarded migration (#37) (5001ccc)
+
+## 0.1.6 (2026-10-09)
+
+
+### Bug Fixes
+
+* **store:** mint issue ids under the configured issue prefix (#35) (b4db95c)
+
+## 0.1.5 (2026-10-09)
+
+
+### Bug Fixes
+
+* wait for exact Worker identity during propagation (#33) (6183a21)
+
+## 0.1.4 (2026-10-09)
+
+
+### Bug Fixes
+
+* update cf CLI to the current deployment release (#31) (bc2406f)
+
+## 0.1.3 (2026-10-09)
+
+
+### Features
+
+* **auth:** grant pinned GitHub App tracker read access (#29) (60ac484)
+
+
+### Bug Fixes
+
+* resolve Worker source imports in deployment verifier (#28) (679eee3)
+
+## 0.1.2 (2026-10-09)
+
+
+### Features
+
+* enroll Beads in compiled Delivery (#11) (96f41ed)
+
+
+### Bug Fixes
+
+* admit tracker migration batches atomically (#10) (a40085c)
+* **auth:** preserve actor isolation and admit bounded publication bootstrap (#9) (737d316)
+* **ci:** adopt qualified private checkout diagnostics (#12) (6cccae7)
+* project canonical release notes into public export (#27) (2df88dc)
 
 ## [0.1.1] - 2026-10-08
 

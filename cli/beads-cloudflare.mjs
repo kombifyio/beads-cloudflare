@@ -9,6 +9,7 @@
 // Plain Node 22+ with no dependencies of its own. Everything in the Cloudflare account goes through the Cloudflare CLI
 // (`cf`, installed and signed in; setup checks it first); `cf deploy` runs the project's pinned Wrangler internally.
 import { parseArgs } from "node:util";
+import { redact } from "./output.mjs";
 import { CLI_VERSION, bootstrapCommand, credentialsCommand, doctorCommand, joinCommand, setupCommand, uninstallCommand } from "./commands.mjs";
 
 const HELP = `beads-cloudflare ${CLI_VERSION}
@@ -41,6 +42,7 @@ Options
   --no-join              setup: only deploy the store.
   --allow-outdated-cf    setup: continue with an older cf than the newest release (offline use; by default an old cf is a failure).
   --admin-email <list>   setup: people allowed to manage keys through sign-in (optional).
+  --github-policy <file> setup: JSON repository-to-tracker policy; omitted policy keeps the deployed value.
   --access-issuer <url> --access-client-id <id> --access-client-secret <secret>
                          setup: turn on human sign-in through Cloudflare Access (optional).
   --bin-dir <dir>        Where bd is installed (default ~/.local/bin, %LOCALAPPDATA%\\Programs\\beads-cloudflare\\bin).
@@ -72,6 +74,7 @@ const options = {
   all: { type: "boolean", default: false },
   "replace-existing-workspace": { type: "boolean", default: false },
   "admin-email": { type: "string" },
+  "github-policy": { type: "string" },
   "access-issuer": { type: "string", default: process.env.ACCESS_ISSUER },
   "access-client-id": { type: "string", default: process.env.ACCESS_CLIENT_ID },
   "access-client-secret": { type: "string", default: process.env.ACCESS_CLIENT_SECRET },
@@ -88,7 +91,7 @@ let parsed;
 try {
   parsed = parseArgs({ options, allowPositionals: true });
 } catch (error) {
-  console.error(`beads-cloudflare: ${error.message}\n\n${HELP}`);
+  console.error(`beads-cloudflare: ${redact(error.message)}\n\n${HELP}`);
   process.exit(2);
 }
 const { values: flag, positionals } = parsed;
@@ -105,14 +108,14 @@ if (flag.help || !command) {
 
 const commands = { setup: setupCommand, join: joinCommand, bootstrap: bootstrapCommand, credentials: credentialsCommand, doctor: doctorCommand, uninstall: uninstallCommand };
 if (!commands[command]) {
-  console.error(`beads-cloudflare: unknown command "${command}"\n\n${HELP}`);
+  console.error(`beads-cloudflare: unknown command "${redact(command)}"\n\n${HELP}`);
   process.exit(2);
 }
 
 try {
   process.exitCode = await commands[command](flag, rest);
 } catch (error) {
-  console.error(`\nbeads-cloudflare: FAILED unexpectedly: ${error?.stack ?? error}`);
+  console.error(`\nbeads-cloudflare: FAILED unexpectedly: ${redact(error?.stack ?? error)}`);
   console.error(`Please report this with the output above: https://github.com/kombifyio/beads-cloudflare/issues`);
   process.exitCode = 1;
 }

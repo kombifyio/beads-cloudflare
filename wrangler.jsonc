@@ -10,6 +10,7 @@
   // global_fetch_strictly_public: required by the OAuth provider for Client ID Metadata Documents.
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": { "enabled": true },
+  "triggers": { "crons": ["17 * * * *"] },
   "durable_objects": {
     "bindings": [{ "name": "TEAM_STORE", "class_name": "TeamStore" }]
   },
@@ -21,6 +22,8 @@
   "vars": {
     // The single team of phase 1; one TeamStore Durable Object per team name.
     "TEAM": "default",
+    "PORTFOLIO_TITLE": "Beads portfolio",
+    "PORTFOLIO_REPOSITORIES": "",
     // Canonical public origin: the OAuth resource (token audience) and issuer.
     "PUBLIC_ORIGIN": "https://beads.example.workers.dev",
     // Humans allowed to manage agent API keys over OAuth (comma list of emails). Empty: only the admin token.
@@ -28,6 +31,9 @@
     // Exact GitHub owner/repository -> { trackers: ["tracker-id"], import?: true } mappings.
     // Empty denies repository exchanges. Import requires an explicit operator grant.
     "GITHUB_REPOSITORIES": "{}",
+    // Optional { app_id, installation_id, repositories: ["owner/repository"] } read-only App grant.
+    // Empty denies App readers; it never changes the repository/tracker writer mappings.
+    "GITHUB_READ_APP": "",
     // Cloudflare Access for SaaS (OIDC) issuer; authorization, token and JWKS URLs derive from it.
     // Empty: sign-in is not configured and only agent API keys work. See the README.
     "ACCESS_ISSUER": ""

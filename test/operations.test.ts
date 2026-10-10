@@ -233,6 +233,20 @@ describe("settings", () => {
     expect((await call("GET", `${base}/ui.theme`, token)).body).toEqual({ key: "ui.theme", redacted: false });
     expect((await call("PUT", `${base}/ui.theme`, token, { value: "x", other: 1 })).status).toBe(400);
   });
+
+  it("mints ids under a configured issue_prefix, so a child id derived the way bd derives it passes the prefix check", async () => {
+    const token = await tokenFor("prefix@example.com");
+    const t = tracker("prefixed", token);
+    // A mirrored workspace keeps its own prefix; one trailing dash is the separator, as upstream reads it.
+    expect((await call("POST", "/t/prefixed/v0/beads/config", token, { key: "issue_prefix", value: "plat-" })).status).toBe(200);
+    const root = await t.create("root");
+    expect(root).toMatch(/^plat-[0-9a-z]{3,8}$/);
+    // bd computes `<parent>.<n>` itself and checks it against the prefix before it sends the create.
+    const child = await t.post("/issues", { id: `${root}.1`, title: "child", issue_type: "task", priority: 2 });
+    expect(child.status).toBe(200);
+    expect(child.body.id).toBe(`${root}.1`);
+    expect((await t.post("/issues", { id: "prefixed-x", title: "foreign", issue_type: "task", priority: 2 })).status).toBe(400);
+  });
 });
 
 describe("batches", () => {
@@ -674,6 +688,113 @@ describe("bulk export", () => {
 describe("merge import", () => {
   const rec = (id: string, extra: object = {}) => ({
     id, title: id, priority: 2, status: "open", issue_type: "task", created_at: "2025-01-01T00:00:00Z", updated_at: "2025-03-01T00:00:00Z", ...extra,
+  });
+
+  it("stamps new-row merge comments with the writer's identity unless import provenance is authorized", async () => {
+    const who = "new-row-merger@example.com";
+    const writer = tracker("mrg-authorship", await tokenFor(who));
+    const importer = tracker("mrg-authorship", await keyWithImport("merge-authorship"));
+    const comment = { id: "historical-comment", author: "someone-else@example.com", text: "authored comment", created_at: "2025-02-02T00:00:00Z" };
+    const ordinary = rec("mrg-authorship-new", { comments: [comment] });
+    const before = Date.now();
+    expect((await writer.post("/issues:import", { mode: "merge", issues: [ordinary] })).status).toBe(200);
+    const first = (await writer.get(`/issues/${ordinary.id}?include_comments=true`)).body.comments;
+    expect(first[0].author).toBe(who);
+    expect(Date.parse(first[0].created_at)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(first[0].created_at)).toBeLessThanOrEqual(Date.now());
+    expect((await writer.post("/issues:import", { mode: "merge", issues: [ordinary] })).status).toBe(200);
+    expect((await writer.get(`/issues/${ordinary.id}?include_comments=true`)).body.comments).toEqual(first);
+
+    const historical = rec("mrg-authorship-preserved", { comments: [{ ...comment, id: "preserved-comment" }] });
+    expect((await importer.post("/issues:import", { mode: "merge", issues: [historical] })).status).toBe(200);
+    const kept = (await importer.get(`/issues/${historical.id}?include_comments=true`)).body.comments[0];
+    expect(kept.author).toBe(comment.author);
+    expect(Date.parse(kept.created_at)).toBe(Date.parse(comment.created_at));
+  });
+
+  it("guards migration batches against intervening claims and deletion without partial effects", async () => {
+    const t = tracker("mrg-guard", await keyWithImport("migration-guard"), "importer");
+    const worker = tracker("mrg-guard", await tokenFor("migration-worker@example.com"), "worker");
+    const held = "mrg-guard-held", deleted = "mrg-guard-deleted", admitted = "mrg-guard-admitted", created = "mrg-guard-created";
+    const first = "mrg-guard-first";
+    const head = async () => (await t.get("/events?since=0&limit=1")).body.head as number;
+    const guarded = (expected_event_head: number, issues: object[], extra: object = {}) => ({
+      mode: "merge", reject_stale: true, migration_guard: { schema_version: 1, expected_event_head }, issues, ...extra,
+    });
+    const post = (body: object) => t.post("/issues:import", body);
+    const capabilities = (await t.get("/context")).body.capabilities as string[];
+    if (!capabilities.includes("profile.import_migration_guard_v1")) throw new Error("Guarded migration is not supported");
+    expect((await post({ issues: [rec(held), rec(deleted), rec(admitted)] })).status).toBe(200);
+
+    const planned = await head();
+    expect((await worker.post(`/issues/${held}:claim`, {})).status).toBe(200);
+    const claimBefore = (await t.get(`/issues/${held}?include_comments=true`)).body;
+    const attemptedClaim = rec(held, { status: claimBefore.status, assignee: claimBefore.assignee,
+      updated_at: "2099-01-01T00:00:00Z", notes: "must not overwrite", labels: ["must-not-add"],
+      comments: [{ author: "source", text: "must not append", created_at: "2099-01-01T00:00:00Z" }] });
+    const firstRow = rec(first);
+    const raced = await post(guarded(planned, [firstRow, attemptedClaim]));
+    expect(raced.status).toBe(409);
+    expect(raced.body).toMatchObject({ code: "precondition_failed", reason: "migration_event_head_changed" });
+    const claimedHead = await head();
+    const claimed = await post(guarded(claimedHead, [firstRow, attemptedClaim]));
+    expect(claimed.status).toBe(409);
+    expect(claimed.body).toMatchObject({ reason: "migration_claimed_issue", x_issue_id: held });
+    expect((await t.get(`/issues/${held}?include_comments=true`)).body).toEqual(claimBefore);
+    expect((await t.get(`/issues/${first}`)).status).toBe(404);
+    expect(await head()).toBe(claimedHead);
+
+    const beforeDelete = await head();
+    expect((await t.post("/issues:delete", { ids: [deleted], force: true })).status).toBe(200);
+    const futureDeleted = rec(deleted, { updated_at: "2099-01-01T00:00:00Z" });
+    const deletionRace = await post(guarded(beforeDelete, [firstRow, futureDeleted]));
+    expect(deletionRace.status).toBe(409);
+    expect(deletionRace.body).toMatchObject({ reason: "migration_event_head_changed" });
+    const deletedHead = await head();
+    const tombstoned = await post(guarded(deletedHead, [firstRow, futureDeleted]));
+    expect(tombstoned.status).toBe(409);
+    expect(tombstoned.body).toMatchObject({ reason: "migration_tombstoned_issue", x_issue_id: deleted });
+    expect((await t.get(`/issues/${deleted}`)).status).toBe(404);
+    expect((await t.get(`/issues/${first}`)).status).toBe(404);
+    expect(await head()).toBe(deletedHead);
+
+    const before = (await t.get(`/issues/${admitted}`)).body;
+    const equalTime = await post(guarded(deletedHead, [firstRow, rec(admitted, { labels: ["must-not-add"] })]));
+    expect(equalTime.status).toBe(409);
+    expect(equalTime.body).toMatchObject({ reason: "migration_record_not_newer" });
+    expect((await t.get(`/issues/${admitted}`)).body).toEqual(before);
+    expect((await t.get(`/issues/${first}`)).status).toBe(404);
+
+    const foreign = "foreign-migration-identity";
+    const prefixBypass = await post(guarded(deletedHead, [firstRow, rec(foreign)], { skip_prefix_validation: true }));
+    expect(prefixBypass.status).toBe(400);
+    expect((await t.get(`/issues/${foreign}`)).status).toBe(404);
+    expect((await t.get(`/issues/${first}`)).status).toBe(404);
+    expect(await head()).toBe(deletedHead);
+
+    const candidates = [rec(created, { description: "created by admitted migration" }), rec(admitted, {
+      updated_at: "2025-04-01T00:00:00Z", notes: "migrated", labels: ["migrated"],
+      comments: [{ author: "source-author", text: "preserved provenance", created_at: "2025-04-01T00:00:00Z" }],
+    })];
+    for (const extra of [{ memories: [] }, { sync_issue_prefix: "other" }, { override_claims: true }, { reject_stale: false },
+      { migration_guard: { schema_version: 1, expected_event_head: -1 } },
+      { migration_guard: { schema_version: 1, expected_event_head: deletedHead, unsafe: true } }]) {
+      expect((await post(guarded(deletedHead, candidates, extra))).status).toBe(400);
+    }
+    expect((await worker.post("/issues:import", guarded(deletedHead, candidates))).status).toBe(403);
+    expect((await t.get(`/issues/${admitted}`)).body).toEqual(before);
+    expect((await t.get(`/issues/${created}`)).status).toBe(404);
+    expect(await head()).toBe(deletedHead);
+
+    const accepted = await post(guarded(deletedHead, candidates));
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.migration_guard).toEqual({ schema_version: 1, expected_event_head: deletedHead, event_head: await head() });
+    expect(accepted.body.migration_guard.event_head).toBeGreaterThan(deletedHead);
+    expect((await t.get(`/issues/${created}`)).body.description).toBe("created by admitted migration");
+    expect((await t.get(`/issues/${admitted}?include_comments=true`)).body).toMatchObject({ notes: "migrated", labels: ["migrated"],
+      comments: [{ author: "source-author", text: "preserved provenance" }] });
+    expect((await t.get(`/issues/${held}?include_comments=true`)).body).toEqual(claimBefore);
+    expect((await t.get(`/issues/${deleted}`)).status).toBe(404);
   });
 
   it("keeps deleted issues gone on delayed shadow imports while allowing newer records and authority restores", async () => {

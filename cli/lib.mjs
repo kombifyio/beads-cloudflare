@@ -294,18 +294,16 @@ export function readCfList(text, what) {
 }
 
 /**
- * What a deployed Worker's newest version says about itself: its public origin, admin e-mails, sign-in issuer and the KV
- * namespace bound as OAUTH_KV. `missing` names every field the output did not carry.
+ * The actively deployed version's public origin, sign-in settings, repository authorization and OAUTH_KV.
+ * The caller selects the active version from deployment traffic, never from an undeployed upload.
  */
-export function readDeployedSettings(versions) {
-  if (!Array.isArray(versions) || !versions.length) return { missing: ["versions"] };
-  const newest = versions.reduce((best, v) => ((v?.number ?? 0) > (best?.number ?? 0) ? v : best), versions[0]);
-  const bindings = Array.isArray(newest?.bindings) ? newest.bindings : [];
+export function readDeployedSettings(version) {
+  const bindings = Array.isArray(version?.bindings) ? version.bindings : [];
   const text = (name) => bindings.find((b) => b?.name === name && b.type === "plain_text" && typeof b.text === "string")?.text;
   const kv = bindings.find((b) => b?.name === "OAUTH_KV");
-  const found = { version: newest?.number, origin: text("PUBLIC_ORIGIN"), adminEmails: text("ADMIN_EMAILS"), accessIssuer: text("ACCESS_ISSUER"), kvId: kv?.namespace_id ?? kv?.id };
+  const found = { version: version?.number, origin: text("PUBLIC_ORIGIN"), adminEmails: text("ADMIN_EMAILS"), accessIssuer: text("ACCESS_ISSUER"), githubRepositories: text("GITHUB_REPOSITORIES"), githubReadApp: text("GITHUB_READ_APP"), kvId: kv?.namespace_id ?? kv?.id };
   const missing = [];
-  if (!Array.isArray(newest?.bindings)) missing.push("bindings");
+  if (!Array.isArray(version?.bindings)) missing.push("bindings");
   for (const [field, key] of [["PUBLIC_ORIGIN", "origin"], ["ADMIN_EMAILS", "adminEmails"], ["ACCESS_ISSUER", "accessIssuer"], ["OAUTH_KV", "kvId"]]) if (found[key] === undefined) missing.push(field);
   return { ...found, missing };
 }
@@ -319,7 +317,7 @@ export function secretNamesOf(items) {
  * The values the project's cloudflare.config.ts reads from the environment. Nothing else about the deployment is variable,
  * so this is the whole contract between the setup tool and the deploy configuration.
  */
-export function deployEnv({ name, kvId, origin, adminEmails, accessIssuer, accessSecrets, accountId }) {
+export function deployEnv({ name, kvId, origin, adminEmails, accessIssuer, accessSecrets, githubRepositories, githubReadApp, accountId }) {
   return {
     BEADS_WORKER_NAME: name,
     BEADS_KV_ID: kvId,
@@ -327,6 +325,8 @@ export function deployEnv({ name, kvId, origin, adminEmails, accessIssuer, acces
     BEADS_ADMIN_EMAILS: adminEmails ?? "",
     BEADS_ACCESS_ISSUER: accessIssuer ?? "",
     BEADS_ACCESS_SECRETS: accessSecrets ? "1" : "",
+    BEADS_GITHUB_REPOSITORIES: githubRepositories ?? "{}",
+    BEADS_GITHUB_READ_APP: githubReadApp ?? "",
     ...(accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {}),
   };
 }

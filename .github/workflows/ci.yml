@@ -1,14 +1,12 @@
 name: CI
 
-# One CI for the pair. A pull request proves, in one run, that this tree's Worker and this
-# tree's bd work together: the Worker is checked on its own, the Go module is checked on
-# its own, and then bd is built from the tree and run against the Worker (started locally
-# with workerd) through the smoke script and the upstream conformance suite. No deployed
-# store and no secrets are involved. This file is exported to the public repository as it is.
+# Source checks run without a database. The admitted private publisher separately
+# proves the native client against its exact live Worker and shared test identity.
+# This file is exported to the public repository.
 on:
-  pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,7 +17,7 @@ concurrency:
 
 jobs:
   worker:
-    name: Worker typecheck and tests
+    name: Worker typecheck and pure regressions
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -34,7 +32,10 @@ jobs:
         run: node scripts/sync-version.mjs --check
       - run: pnpm gen && git diff --exit-code -- src/generated
       - run: pnpm typecheck
-      - run: pnpm test
+      - name: Guarded historical identity admission regression
+        run: node --test scripts/import-prefix.test.mjs
+      - name: Conformance and immutable artifact regressions
+        run: node --test "test/*.pure.test.mjs" scripts/conformance-result.test.mjs scripts/release-artifacts.test.mjs
       - name: Setup CLI tests
         run: pnpm test:cli
 
@@ -61,31 +62,3 @@ jobs:
             git --no-pager diff -- .
             exit 1
           fi
-
-  pair:
-    name: Pair proof (bd build, local Worker, smoke, conformance)
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # The Go module cache and build cache are restored by setup-go; the shallow clone of
-      # the pinned upstream tag is cached next to them so a run does not clone upstream.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: bd/go.mod
-          cache-dependency-path: bd/go.sum
-      - name: Pinned upstream version
-        id: upstream
-        run: echo "tag=$(sed -n 's#^require github.com/steveyegge/beads \(v[0-9.]*\)$#\1#p' bd/go.mod | head -1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/upstream-beads
-          key: upstream-beads-${{ steps.upstream.outputs.tag }}
-      - name: Build bd, start the Worker, run the smoke script and the conformance suite
-        run: UPSTREAM_CACHE="$HOME/upstream-beads" bash scripts/pair-proof.sh
