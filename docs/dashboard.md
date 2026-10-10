@@ -38,6 +38,18 @@ ancestor is reported as unfiled. It reads the authorized brief native listing
 (at most 40 pages of 500, marked `truncated` beyond that) and caches the
 per-tracker projection in KV for five minutes; `?fresh=true` bypasses the cache.
 
+## Repository columns
+
+Click any repository column heading to sort it; click again to reverse the
+order. Counts and progress sort numerically, and updated timestamps sort
+chronologically. Unavailable values stay last in both directions.
+
+Combine repository/alias search and area selection with inclusive minimum and
+maximum values under each numeric column, or a local calendar date range under
+Updated. Empty bounds are unrestricted. Reset filters clears every repository
+filter while preserving the selected sort. Filters and sorting survive data
+refreshes and language changes in the current page.
+
 ## Metrics and history
 
 Counts include all durable issues, including templates and infrastructure,

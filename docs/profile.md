@@ -12,9 +12,11 @@ name carries the core type and semantics or is absent.
   `POST /t/{tracker}/v0/beads/issues`. A tracker is a Beads project; its id is the issue-id prefix.
   Trackers are created implicitly by their first write. Tracker ids match `[a-z0-9]+(-[a-z0-9]+)*`,
   at most 40 characters.
-- **Project stamp.** `Bd-Project-Id`, when present, must equal `{tracker}`; otherwise `400`,
-  `reason: project_mismatch`, `server_project_id: {tracker}`. `project_id` in `getContext` is the
-  tracker id. Capability token `project.enforce` is advertised.
+- **Project stamp.** Except on health and context reads, `Bd-Project-Id`, when present, must equal
+  either `{tracker}` or the project id stored by an import; otherwise `400`,
+  `reason: project_mismatch`, with `server_project_id` naming that stored project id (or the tracker
+  id when none was imported). `project_id` in `getContext` carries the same project identity.
+  Capability token `project.enforce` is advertised.
 - **Implemented operations** (all others answer the undefined-path `404`, and have no capability
   token): `getContext`, `health`, `listReadyWork`, `countReadyWork`, `listIssues`, `getIssue`,
   `createIssue`, `updateIssue`, `closeIssue`, `reopenIssue`, `claimIssue`, `releaseIssue`,

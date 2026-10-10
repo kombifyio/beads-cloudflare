@@ -3,14 +3,18 @@ export const dashboardScript = String.raw`
 (() => {
   'use strict';
   const copy = {
-    de: { areas:'Bereiche',areasHint:'Klick auf einen Bereich filtert Repositories und Scopes.',allAreas:'Gesamtes Ökosystem',repoCount:'Repositories',scopes:'Scopes',labels:'Labels',types:'Typen',searchScopes:'Scope suchen …',scopeNote:'Scopes sind Labels oder Aufgabentypen über alle Repositories. Eine Aufgabe kann mehrere Labels tragen.',scope:'Scope',noScopes:'Keine Scopes für diese Auswahl.',modules:'Module',modulesHint:'Epics mit dem Fortschritt ihrer Unteraufgaben.',repoScopes:'Scopes in diesem Repository',noModules:'Keine Epics in diesem Repository.',unfiled:'Ohne Modul',truncated:'Sehr großer Tracker: nicht alle Aufgaben wurden ausgewertet.',scopesPartial:'Nicht lesbar:',inRepos:'in',subtasks:'Unteraufgaben',refresh:'Aktualisieren',logout:'Abmelden',signedIn:'Angemeldet als',eyebrow:'Cloudflare · Beads',title:'Arbeit im Überblick.',intro:'Aktuelle Aufgaben und ihr Verlauf, direkt aus der gemeinsamen Beads-Datenquelle.',history:'Aufgabenverlauf',historySource:'Datenquelle',archive:'Dolt-Archiv',archiveNote:'Dolt-Archiv · ursprünglich erfasste Tage (Europe/Berlin). Historische Repository-Abdeckung kann variieren.',days:' Tage',table:'Tabelle',ratio:'Fortschritt = abgeschlossene Aufgaben ÷ alle Aufgaben. Dies misst Aufgabenabschluss, keine Produktreife.',repositories:'Repositories',searchRepos:'Repository suchen …',sortName:'Name',sortActive:'Aktive Aufgaben',sortBlocked:'Blockierte Aufgaben',sortCompletion:'Fortschritt',footer:'Cloudflare ist die operative Beads-Datenquelle.',readonly:'Lesender Zugriff · keine Aufgabenänderungen',close:'Schließen',searchTasks:'Aufgaben suchen …',more:'Weitere laden',total:'Alle Aufgaben',open:'Offen',in_progress:'In Arbeit',blocked:'Blockiert',closed:'Abgeschlossen',deferred:'Zurückgestellt',active:'Aktiv',completion:'Fortschritt',all:'Alle',allGroups:'Alle Gruppen',loading:'Daten werden geladen …',failed:'Daten konnten nicht geladen werden. Bitte erneut versuchen.',login:'Anmelden',unauthorized:'Bitte anmelden, um die privaten Beads-Daten zu sehen.',partial:'Einige Repositories konnten nicht gelesen werden. Die angezeigten Summen sind unvollständig.',stale:'Dieser Datenstand ist älter als 15 Minuten.',updated:'Stand',noRepos:'Keine Repositories für diese Auswahl.',noTasks:'Keine Aufgaben für diese Auswahl.',noHistory:'Noch keine historischen Beobachtungen. Der Verlauf wächst mit den täglichen Erfassungen.',date:'Datum',tasks:'Aufgaben',owner:'Zuständig',priority:'Priorität',type:'Typ',description:'Beschreibung',comments:'Kommentare',dependencies:'Abhängigkeiten',none:'Keine Angaben',unavailable:'Nicht verfügbar',readError:'Lesefehler',shared:'Gemeinsamer Tracker',loaded:'Aufgaben geladen',noPageTasks:'Keine Treffer auf dieser Seite. Weitere Seiten sind verfügbar.',current:'Aktueller Stand',utcDays:'Tagesstände nach UTC.',range:'Tagesverlauf',unassigned:'Unzugewiesen',ready:'Bereit',chartLabel:'Verlauf abgeschlossener und aller Aufgaben',closedLegend:'Abgeschlossen',totalLegend:'Alle Aufgaben' },
-    en: { areas:'Areas',areasHint:'Click an area to filter repositories and scopes.',allAreas:'Whole ecosystem',repoCount:'Repositories',scopes:'Scopes',labels:'Labels',types:'Types',searchScopes:'Search scopes …',scopeNote:'Scopes are labels or task types across all repositories. A task can carry several labels.',scope:'Scope',noScopes:'No scopes match this selection.',modules:'Modules',modulesHint:'Epics with the progress of their subtasks.',repoScopes:'Scopes in this repository',noModules:'No epics in this repository.',unfiled:'No module',truncated:'Very large tracker: not every task was evaluated.',scopesPartial:'Unreadable:',inRepos:'in',subtasks:'subtasks',refresh:'Refresh',logout:'Sign out',signedIn:'Signed in as',eyebrow:'Cloudflare · Beads',title:'Work at a glance.',intro:'Current tasks and their history, directly from the shared Beads data source.',history:'Task history',historySource:'Data source',archive:'Dolt archive',archiveNote:'Dolt archive · originally recorded days (Europe/Berlin). Historical repository coverage varies.',days:' days',table:'Table',ratio:'Progress = closed tasks ÷ all tasks. This measures task closure, not product readiness.',repositories:'Repositories',searchRepos:'Search repositories …',sortName:'Name',sortActive:'Active tasks',sortBlocked:'Blocked tasks',sortCompletion:'Progress',footer:'Cloudflare is the operational Beads data source.',readonly:'Read-only access · no task changes',close:'Close',searchTasks:'Search tasks …',more:'Load more',total:'All tasks',open:'Open',in_progress:'In progress',blocked:'Blocked',closed:'Closed',deferred:'Deferred',active:'Active',completion:'Progress',all:'All',allGroups:'All groups',loading:'Loading data …',failed:'Could not load data. Please try again.',login:'Sign in',unauthorized:'Sign in to view private Beads data.',partial:'Some repositories could not be read. Displayed totals are incomplete.',stale:'This snapshot is more than 15 minutes old.',updated:'Updated',noRepos:'No repositories match this selection.',noTasks:'No tasks match this selection.',noHistory:'No historical observations yet. History grows with daily captures.',date:'Date',tasks:'Tasks',owner:'Assignee',priority:'Priority',type:'Type',description:'Description',comments:'Comments',dependencies:'Dependencies',none:'No information',unavailable:'Unavailable',readError:'Read error',shared:'Shared tracker',loaded:'tasks loaded',noPageTasks:'No matches on this page. More pages are available.',current:'Current observation',utcDays:'Daily observations in UTC.',range:'Daily history',unassigned:'Unassigned',ready:'Ready',chartLabel:'History of closed and all tasks',closedLegend:'Closed',totalLegend:'All tasks' }
+    de: { resetFilters:'Filter zurücksetzen',minimum:'Min.',maximum:'Max.',fromDate:'Ab Datum',throughDate:'Bis Datum',sortAscending:'Aufsteigend sortieren',sortDescending:'Absteigend sortieren',filterHint:'Suche nach Name, Tracker oder Alias. Zahlen und Datum lassen sich unten eingrenzen.',matchingRepos:'Repositories angezeigt', areas:'Bereiche',areasHint:'Klick auf einen Bereich filtert Repositories und Scopes.',allAreas:'Gesamtes Ökosystem',repoCount:'Repositories',scopes:'Scopes',labels:'Labels',types:'Typen',searchScopes:'Scope suchen …',scopeNote:'Scopes sind Labels oder Aufgabentypen über alle Repositories. Eine Aufgabe kann mehrere Labels tragen.',scope:'Scope',noScopes:'Keine Scopes für diese Auswahl.',modules:'Module',modulesHint:'Epics mit dem Fortschritt ihrer Unteraufgaben.',repoScopes:'Scopes in diesem Repository',noModules:'Keine Epics in diesem Repository.',unfiled:'Ohne Modul',truncated:'Sehr großer Tracker: nicht alle Aufgaben wurden ausgewertet.',scopesPartial:'Nicht lesbar:',inRepos:'in',subtasks:'Unteraufgaben',refresh:'Aktualisieren',logout:'Abmelden',signedIn:'Angemeldet als',eyebrow:'Cloudflare · Beads',title:'Arbeit im Überblick.',intro:'Aktuelle Aufgaben und ihr Verlauf, direkt aus der gemeinsamen Beads-Datenquelle.',history:'Aufgabenverlauf',historySource:'Datenquelle',archive:'Dolt-Archiv',archiveNote:'Dolt-Archiv · ursprünglich erfasste Tage (Europe/Berlin). Historische Repository-Abdeckung kann variieren.',days:' Tage',table:'Tabelle',ratio:'Fortschritt = abgeschlossene Aufgaben ÷ alle Aufgaben. Dies misst Aufgabenabschluss, keine Produktreife.',repositories:'Repositories',searchRepos:'Repository suchen …',sortName:'Name',sortActive:'Aktive Aufgaben',sortBlocked:'Blockierte Aufgaben',sortCompletion:'Fortschritt',footer:'Cloudflare ist die operative Beads-Datenquelle.',readonly:'Lesender Zugriff · keine Aufgabenänderungen',close:'Schließen',searchTasks:'Aufgaben suchen …',more:'Weitere laden',total:'Alle Aufgaben',open:'Offen',in_progress:'In Arbeit',blocked:'Blockiert',closed:'Abgeschlossen',deferred:'Zurückgestellt',active:'Aktiv',completion:'Fortschritt',all:'Alle',allGroups:'Alle Gruppen',loading:'Daten werden geladen …',failed:'Daten konnten nicht geladen werden. Bitte erneut versuchen.',login:'Anmelden',unauthorized:'Bitte anmelden, um die privaten Beads-Daten zu sehen.',partial:'Einige Repositories konnten nicht gelesen werden. Die angezeigten Summen sind unvollständig.',stale:'Dieser Datenstand ist älter als 15 Minuten.',updated:'Stand',noRepos:'Keine Repositories für diese Auswahl.',noTasks:'Keine Aufgaben für diese Auswahl.',noHistory:'Noch keine historischen Beobachtungen. Der Verlauf wächst mit den täglichen Erfassungen.',date:'Datum',tasks:'Aufgaben',owner:'Zuständig',priority:'Priorität',type:'Typ',description:'Beschreibung',comments:'Kommentare',dependencies:'Abhängigkeiten',none:'Keine Angaben',unavailable:'Nicht verfügbar',readError:'Lesefehler',shared:'Gemeinsamer Tracker',loaded:'Aufgaben geladen',noPageTasks:'Keine Treffer auf dieser Seite. Weitere Seiten sind verfügbar.',current:'Aktueller Stand',utcDays:'Tagesstände nach UTC.',range:'Tagesverlauf',unassigned:'Unzugewiesen',ready:'Bereit',chartLabel:'Verlauf abgeschlossener und aller Aufgaben',closedLegend:'Abgeschlossen',totalLegend:'Alle Aufgaben' },
+    en: { resetFilters:'Reset filters',minimum:'Min.',maximum:'Max.',fromDate:'From date',throughDate:'Through date',sortAscending:'Sort ascending',sortDescending:'Sort descending',filterHint:'Search by name, tracker or alias. Narrow numbers and dates below.',matchingRepos:'repositories shown', areas:'Areas',areasHint:'Click an area to filter repositories and scopes.',allAreas:'Whole ecosystem',repoCount:'Repositories',scopes:'Scopes',labels:'Labels',types:'Types',searchScopes:'Search scopes …',scopeNote:'Scopes are labels or task types across all repositories. A task can carry several labels.',scope:'Scope',noScopes:'No scopes match this selection.',modules:'Modules',modulesHint:'Epics with the progress of their subtasks.',repoScopes:'Scopes in this repository',noModules:'No epics in this repository.',unfiled:'No module',truncated:'Very large tracker: not every task was evaluated.',scopesPartial:'Unreadable:',inRepos:'in',subtasks:'subtasks',refresh:'Refresh',logout:'Sign out',signedIn:'Signed in as',eyebrow:'Cloudflare · Beads',title:'Work at a glance.',intro:'Current tasks and their history, directly from the shared Beads data source.',history:'Task history',historySource:'Data source',archive:'Dolt archive',archiveNote:'Dolt archive · originally recorded days (Europe/Berlin). Historical repository coverage varies.',days:' days',table:'Table',ratio:'Progress = closed tasks ÷ all tasks. This measures task closure, not product readiness.',repositories:'Repositories',searchRepos:'Search repositories …',sortName:'Name',sortActive:'Active tasks',sortBlocked:'Blocked tasks',sortCompletion:'Progress',footer:'Cloudflare is the operational Beads data source.',readonly:'Read-only access · no task changes',close:'Close',searchTasks:'Search tasks …',more:'Load more',total:'All tasks',open:'Open',in_progress:'In progress',blocked:'Blocked',closed:'Closed',deferred:'Deferred',active:'Active',completion:'Progress',all:'All',allGroups:'All groups',loading:'Loading data …',failed:'Could not load data. Please try again.',login:'Sign in',unauthorized:'Sign in to view private Beads data.',partial:'Some repositories could not be read. Displayed totals are incomplete.',stale:'This snapshot is more than 15 minutes old.',updated:'Updated',noRepos:'No repositories match this selection.',noTasks:'No tasks match this selection.',noHistory:'No historical observations yet. History grows with daily captures.',date:'Date',tasks:'Tasks',owner:'Assignee',priority:'Priority',type:'Type',description:'Description',comments:'Comments',dependencies:'Dependencies',none:'No information',unavailable:'Unavailable',readError:'Read error',shared:'Shared tracker',loaded:'tasks loaded',noPageTasks:'No matches on this page. More pages are available.',current:'Current observation',utcDays:'Daily observations in UTC.',range:'Daily history',unassigned:'Unassigned',ready:'Ready',chartLabel:'History of closed and all tasks',closedLegend:'Closed',totalLegend:'All tasks' }
   };
   let language = (navigator.language || 'de').startsWith('en') ? 'en' : 'de';
   const groupNames = { de: { integration:'Plattform & Integration', ai:'AI-Plattform', saas:'SaaS', techstack:'Techstack & Runtime', stackkits:'StackKits', 'companion-voice':'Companion & Voice' }, en: { integration:'Platform & integration', ai:'AI platform', saas:'SaaS', techstack:'Techstack & runtime', stackkits:'StackKits', 'companion-voice':'Companion & voice' } };
   const groupName = (g) => (groupNames[language] || {})[g] || g;
   let scopeData, scopeRequest = 0, moduleRequest = 0;
   let authenticated = false, snapshot, days = 30, historySource = 'cloudflare', selectedRepo, taskPage, taskRequest = 0, issueRequest = 0, overviewRequest = 0, searchTimer;
+  let repositorySort = {key:'name',direction:1};
+  let repositoryFilters = {};
+  const repositoryColumns = ['name','total','active','in_progress','blocked','completion','updated'];
+  const repositoryLabel = (key) => key==='name' ? 'repositories' : key;
   const $ = (id) => document.getElementById(id);
   const t = (key) => copy[language][key] || key;
   const num = (n) => Number.isFinite(Number(n)) ? Number(n).toLocaleString(language) : '—';
@@ -23,7 +27,7 @@ export const dashboardScript = String.raw`
   function localize() {
     document.documentElement.lang=language; document.querySelectorAll('[data-i18n]').forEach(n => n.textContent=t(n.dataset.i18n));
     document.querySelectorAll('[data-placeholder]').forEach(n => { n.placeholder=t(n.dataset.placeholder); n.setAttribute('aria-label',n.placeholder); });
-    $('language').textContent=language === 'de' ? 'EN' : 'DE'; $('group').setAttribute('aria-label',t('allGroups')); $('sort').setAttribute('aria-label',t('sortName')); $('task-status').setAttribute('aria-label',t('tasks'));
+    $('language').textContent=language === 'de' ? 'EN' : 'DE'; $('group').setAttribute('aria-label',t('allGroups')); $('task-status').setAttribute('aria-label',t('tasks'));
     const status=$('task-status').value || 'all'; clear($('task-status')); ['all','open','in_progress','blocked','deferred','closed'].forEach(s => { const o=el('option',t(s)); o.value=s; $('task-status').append(o); }); $('task-status').value=status;
     $('history-source').setAttribute('aria-label',t('historySource')); if (snapshot) render(); if (taskPage) renderTasks(); if(selectedRepo) renderRepoHistory();
   }
@@ -84,14 +88,82 @@ export const dashboardScript = String.raw`
     if(!(data.scopes || []).length) chips.append(el('span',t('none'),'sub'));
   }
   function table(headers) { const table=el('table'),thead=el('thead'),tr=el('tr'); headers.forEach(h=>{const th=el('th',t(h)); th.scope='col'; tr.append(th);}); thead.append(tr); table.append(thead); const body=el('tbody'); table.append(body); return {table,body}; }
+  function repositoryValue(repo,key) {
+    if(key==='name') return repo.name;
+    if(key==='updated') { const time=Date.parse(repo.updatedAt); return Number.isFinite(time) ? time : null; }
+    if(repo.error) return null;
+    const value=key==='completion' ? repo.completion : repo.counts[key];
+    return value!==null && value!==undefined && Number.isFinite(Number(value)) ? Number(value) : null;
+  }
   function renderRepositories() {
-    const query=$('repo-search').value.toLocaleLowerCase(), group=$('group').value, sort=$('sort').value;
-    const repos=(snapshot.repositories || []).filter(r=>(!group || r.group===group) && (r.name+' '+r.id+' '+r.tracker+' '+(r.aliases || []).map(a=>typeof a==='string' ? a : a.name || a.id).join(' ')).toLocaleLowerCase().includes(query)).slice().sort((a,b)=> sort==='name' ? a.name.localeCompare(b.name,language) : (sort==='completion' ? b.completion-a.completion : (b.counts[sort] || 0)-(a.counts[sort] || 0)) || a.name.localeCompare(b.name,language));
-    clear($('repositories')); if (!repos.length) return message($('repositories'),'noRepos');
-    const {table:tbl,body}=table(['repositories','total','active','in_progress','blocked','completion','updated']);
+    clear($('repositories'));
+    const {table:tbl}=table([]), head=tbl.tHead, titles=head.rows[0], filters=el('tr',undefined,'column-filters');
+    tbl.className='repository-table';
+    repositoryColumns.forEach(key=>{
+      const th=el('th'), button=el('button',undefined,'column-sort'); th.scope='col'; th.dataset.column=key;
+      button.append(el('span',t(repositoryLabel(key))),el('span',undefined,'sort-indicator'));
+      button.lastChild.setAttribute('aria-hidden','true');
+      button.addEventListener('click',()=>{
+        repositorySort={key,direction:repositorySort.key===key ? -repositorySort.direction : key==='name' ? 1 : -1};
+        renderRepositoryRows();
+      }); th.append(button); titles.append(th);
+      const cell=el('td');
+      if(key==='name') cell.append(el('span',t('filterHint'),'filter-hint'));
+      else {
+        const isDate=key==='updated', range=repositoryFilters[key] || {};
+        ['min','max'].forEach(bound=>{
+          const label=el('label',t(isDate ? bound==='min' ? 'fromDate' : 'throughDate' : bound==='min' ? 'minimum' : 'maximum'));
+          const input=el('input'); input.type=isDate ? 'date' : 'number'; input.value=range[bound] || '';
+          input.id='filter-'+key+'-'+bound;
+          input.setAttribute('aria-label',t(repositoryLabel(key))+' · '+label.textContent);
+          if(!isDate) { input.min='0'; input.step='1'; if(key==='completion') input.max='100'; }
+          input.addEventListener('input',()=>{
+            repositoryFilters[key]={...repositoryFilters[key],[bound]:input.value}; renderRepositoryRows();
+          }); label.append(input); cell.append(label);
+        });
+      }
+      filters.append(cell);
+    });
+    head.append(filters); $('repositories').append(tbl); renderRepositoryRows();
+  }
+  function renderRepositoryRows() {
+    const query=$('repo-search').value.trim().toLocaleLowerCase(language), group=$('group').value;
+    const all=snapshot.repositories || [];
+    const repos=all.filter(repo=>{
+      if(group && repo.group!==group) return false;
+      if(!(repo.name+' '+repo.id+' '+repo.tracker+' '+(repo.aliases || []).map(a=>typeof a==='string' ? a : a.name || a.id).join(' ')).toLocaleLowerCase(language).includes(query)) return false;
+      return Object.entries(repositoryFilters).every(([key,range])=>{
+        const value=repositoryValue(repo,key);
+        return ['min','max'].every(bound=>{
+          if(!range[bound]) return true;
+          if(value===null) return false;
+          if(key==='updated') {
+            // Date inputs describe whole days in the same local timezone as the displayed timestamps.
+            const day=new Date(value), localDay=[day.getFullYear(),String(day.getMonth()+1).padStart(2,'0'),String(day.getDate()).padStart(2,'0')].join('-');
+            return bound==='min' ? localDay>=range[bound] : localDay<=range[bound];
+          }
+          return bound==='min' ? value>=Number(range[bound]) : value<=Number(range[bound]);
+        });
+      });
+    }).sort((a,b)=>{
+      const av=repositoryValue(a,repositorySort.key), bv=repositoryValue(b,repositorySort.key);
+      // Unavailable metrics stay last in either direction, rather than masquerading as zero.
+      if(av===null || bv===null) return av===bv ? a.name.localeCompare(b.name,language) : av===null ? 1 : -1;
+      const order=typeof av==='string' ? av.localeCompare(bv,language) : av-bv;
+      return order*repositorySort.direction || a.name.localeCompare(b.name,language);
+    });
+    const tbl=$('repositories').querySelector('table'), body=tbl.tBodies[0]; clear(body);
+    tbl.querySelectorAll('th[data-column]').forEach(th=>{
+      const active=repositorySort.key===th.dataset.column, ascending=active && repositorySort.direction===1;
+      th.setAttribute('aria-sort',active ? ascending ? 'ascending' : 'descending' : 'none');
+      th.querySelector('.sort-indicator').textContent=active ? ascending ? '↑' : '↓' : '↕';
+      th.firstChild.setAttribute('aria-label',t(repositoryLabel(th.dataset.column))+' · '+t(ascending || !active && th.dataset.column!=='name' ? 'sortDescending' : 'sortAscending'));
+    });
+    $('repo-results').textContent=num(repos.length)+' / '+num(all.length)+' '+t('matchingRepos');
+    if(!repos.length) { const row=el('tr'), cell=el('td',t('noRepos'),'empty'); cell.colSpan=repositoryColumns.length; row.append(cell); body.append(row); return; }
     repos.forEach(repo=>{ const row=el('tr'),name=el('td'),button=el('button',repo.name,'repo-name'); button.addEventListener('click',()=>openRepo(repo)); name.append(button,el('span',(repo.group ? groupName(repo.group)+' · ' : '')+repo.tracker,'sub')); if((repo.aliases || []).length) name.append(el('span',t('shared')+' · '+repo.aliases.map(a=>typeof a==='string' ? a : a.name || a.id).join(', '),'sub')); if(repo.error) name.append(el('span',t('readError'),'sub danger-text')); row.append(name);
       ['total','active','in_progress','blocked'].forEach(k=>row.append(el('td',repo.error ? '—' : num(repo.counts[k]),k==='blocked' && repo.counts[k] ? 'danger-text' : '')));
-      const progress=el('td'),wrap=el('div',undefined,'progress'); const pct=Math.max(0,Math.min(100,Number(repo.completion)||0)); const bar=el('span',undefined,'bar'),fill=el('i'); fill.style.width=pct+'%'; bar.append(fill); wrap.append(bar,el('span',repo.error ? '—' : num(pct)+'%')); progress.append(wrap); row.append(progress,el('td',date(repo.updatedAt))); body.append(row); }); $('repositories').append(tbl);
+      const progress=el('td'),wrap=el('div',undefined,'progress'); const pct=Math.max(0,Math.min(100,Number(repo.completion)||0)); const bar=el('span',undefined,'bar'),fill=el('i'); fill.style.width=pct+'%'; bar.append(fill); wrap.append(bar,el('span',repo.error ? '—' : num(pct)+'%')); progress.append(wrap); row.append(progress,el('td',date(repo.updatedAt))); body.append(row); });
   }
   function renderHistorySources() {
     clear($('history-source')); const live=el('option','Cloudflare');live.value='cloudflare';$('history-source').append(live);
@@ -140,7 +212,8 @@ export const dashboardScript = String.raw`
   async function openIssue(issue) {const request=++issueRequest;$('issue-title').textContent=issue.title;message($('issue-detail'),'loading');$('issue-dialog').showModal();try{const data=await get('/dashboard/api/repositories/'+encodeURIComponent(selectedRepo.id)+'/issues/'+encodeURIComponent(issue.id));if(request!==issueRequest)return;renderIssue(data.issue || data);}catch(err){if(request===issueRequest)error($('issue-detail'),err);}}
   function renderIssue(issue) {const root=$('issue-detail');clear(root);const grid=el('div',undefined,'detail-grid');[['tasks',issue.id],['priority','P'+issue.priority],['owner',issue.assignee || issue.owner],['type',issue.issue_type],['updated',date(issue.updated_at)],['all',t(issue.status)]].forEach(([key,value])=>{const item=el('div',t(key));item.append(el('strong',value || t('none')));grid.append(item);});root.append(grid);const labels=el('div',undefined,'detail-labels');(issue.labels || []).forEach(l=>labels.append(el('span',l,'badge')));root.append(labels,el('h3',t('description')),el('p',issue.description || t('none'),'detail-description')); const deps=issue.dependencies || [];root.append(el('h3',t('dependencies')));if(Array.isArray(deps) && deps.length){const ul=el('ul');deps.forEach(d=>ul.append(el('li',typeof d==='string' ? d : (d.depends_on_id || d.id || '')+' · '+(d.dependency_type || d.type || ''))));root.append(ul);}else root.append(el('p',t('none')));root.append(el('h3',t('comments')));(issue.comments || []).forEach(c=>{const article=el('article',undefined,'comment');article.append(el('strong',c.author || t('none')),el('span',date(c.created_at),'sub'),el('p',c.text || c.body || ''));root.append(article);});if(!(issue.comments || []).length)root.append(el('p',t('none')));}
   $('language').addEventListener('click',()=>{language=language==='de'?'en':'de';localize();}); $('refresh').addEventListener('click',refresh);
-  ['repo-search','group','sort'].forEach(id=>$(id).addEventListener(id==='repo-search'?'input':'change',()=>{if(snapshot){renderRepositories();if(id==='group'){renderAreas();renderScopes();}}}));
+  ['repo-search','group'].forEach(id=>$(id).addEventListener(id==='repo-search'?'input':'change',()=>{if(snapshot){renderRepositories();if(id==='group'){renderAreas();renderScopes();}}}));
+  $('reset-repository-filters').addEventListener('click',()=>{repositoryFilters={};$('repo-search').value='';$('group').value='';if(snapshot){renderRepositories();renderAreas();renderScopes();}});
   ['scope-search','scope-kind'].forEach(id=>$(id).addEventListener(id==='scope-search'?'input':'change',()=>{if(snapshot)renderScopes();}));
   document.querySelectorAll('.range').forEach(button=>button.addEventListener('click',()=>{days=Number(button.dataset.days);document.querySelectorAll('.range').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));if(snapshot)renderHistory();}));
   $('history-source').addEventListener('change',()=>{historySource=$('history-source').value;renderHistorySources();renderHistory();if(selectedRepo)renderRepoHistory();});

@@ -7,6 +7,20 @@ versions may break). The store, `bd` and the setup tool carry one version, the `
 
 ## Unreleased
 
+## 0.1.12 (2026-10-10)
+
+
+### Bug Fixes
+
+* preserve credentials and qualify rolling Worker activation (#53) (0e078dd)
+
+## 0.1.11 (2026-10-10)
+
+
+### Features
+
+* **dashboard:** sort and filter repository columns (#51) (4a9f13e)
+
 ## 0.1.10 (2026-10-10)
 
 

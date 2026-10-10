@@ -73,8 +73,16 @@ globalThis.fetch = async (url) => {
   if (address === "https://www.cloudflare.com/cdn-cgi/trace") return new Response("ok");
   if (address === "https://registry.npmjs.org/cf/latest") return Response.json({ version: "1.0.0-beta.14" });
   if (address === process.env.BCF_BASE + "/healthz") return Response.json({ status: "ok" });
-  if (address.startsWith(process.env.BCF_BASE + "/t/") && address.endsWith("/v0/beads/context")) return Response.json({ x_store_version: process.env.BCF_VERSION, x_min_client_version: "0.1.0" });
-  if (address === process.env.BCF_BASE + "/admin/keys") return Response.json({ key: process.env.BCF_AGENT }, { status: 201 });
+  if (address.startsWith(process.env.BCF_BASE + "/t/") && address.endsWith("/v0/beads/context")) {
+    record({ tool: "context" });
+    if (process.env.BCF_CONTEXT_TRANSPORT_ERROR) throw new Error("fixture connection closed " + process.env.BCF_AGENT);
+    const status = Number(process.env.BCF_CONTEXT_STATUS || 200);
+    return Response.json(status === 200 ? { x_store_version: process.env.BCF_VERSION, x_min_client_version: "0.1.0" } : { code: status === 401 ? "unauthenticated" : status === 403 ? "insufficient_scope" : "internal" }, { status });
+  }
+  if (address === process.env.BCF_BASE + "/admin/keys") {
+    record({ tool: "create-key" });
+    return Response.json({ key: process.env.BCF_AGENT }, { status: 201 });
+  }
   throw new Error("unexpected network request");
 };
 `;
@@ -159,6 +167,33 @@ test("setup keeps issued and provider-echoed credentials out of both output stre
     const state = JSON.parse(readFileSync(join(f.config, "beads-cloudflare", "stores", "beads-cloudflare.json")));
     for (const secret of [state.admin_token, state.cookie_key, AGENT, "fixture-client-secret"]) assert.equal(result.output.includes(secret), false, "credential appeared in CLI output");
   }
+});
+
+test("setup preserves an existing key through rollout and authorization failures, replacing only a rejected credential", (t) => {
+  const f = fixture(t);
+  const args = ["setup", "--origin", BASE, "--no-join"];
+  const initial = f.run(args);
+  assert.equal(initial.status, 0, initial.output);
+  const credentials = join(f.config, "beads-cloudflare", "credentials.json");
+  const original = readFileSync(credentials, "utf8");
+  for (const failure of [{ BCF_CONTEXT_STATUS: "503" }, { BCF_CONTEXT_TRANSPORT_ERROR: "1" }, { BCF_CONTEXT_STATUS: "403" }]) {
+    const result = f.run(args, failure);
+    assert.equal(result.status, 1, result.output);
+    assert.ok(result.calls.some((call) => call.tool === "context"));
+    assert.equal(result.calls.some((call) => call.tool === "create-key"), false, "a failed context read must not create a replacement key");
+    assert.equal(readFileSync(credentials, "utf8"), original, "credential custody changed after a refused or unavailable context");
+    assert.equal(result.output.includes(AGENT), false, "credential appeared in CLI output");
+  }
+  const recovered = f.run(args);
+  assert.equal(recovered.status, 0, recovered.output);
+  assert.equal(recovered.calls.some((call) => call.tool === "create-key"), false);
+  assert.equal(readFileSync(credentials, "utf8"), original);
+  const replacement = "bcf_cli_replacement_not_a_real_key";
+  const rejected = f.run(args, { BCF_CONTEXT_STATUS: "401", BCF_AGENT: replacement });
+  assert.equal(rejected.status, 0, rejected.output);
+  assert.equal(rejected.calls.filter((call) => call.tool === "create-key").length, 1);
+  assert.equal(JSON.parse(readFileSync(credentials, "utf8"))[BASE].token, replacement);
+  assert.equal(rejected.output.includes(replacement), false);
 });
 
 test("doctor refuses a shadowed bd and proves readiness through the selected binary's read", (t) => {

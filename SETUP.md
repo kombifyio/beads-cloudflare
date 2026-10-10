@@ -1,7 +1,7 @@
 # Set up beads-cloudflare (for a coding agent)
 
 This keeps a team's [Beads](https://github.com/gastownhall/beads) trackers in a Cloudflare Worker the
-person owns, so every machine and agent shares one tracker through the ordinary `bd` command. Needs Node 22+
+person owns, so every machine and agent shares one tracker through the ordinary `bd` command. Needs Node 22.23.3+
 and a Cloudflare account, plus the Cloudflare CLI (`cf`) on its newest release and signed in. Setup checks `cf` first
 and prints the fix if it is missing (`npm install -g cf@latest`), old (same command; `--allow-outdated-cf` accepts an older one
 when offline) or signed out (`cf auth login`). Everything setup does in the account goes through `cf`.
@@ -36,6 +36,7 @@ one action, then run `npx --yes github:kombifyio/beads-cloudflare doctor` (the s
 | `Cloudflare login` | Ask the person to run `cf auth login` (a browser opens), or set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. Run `setup` again. |
 | `Cloudflare account` | Set `CLOUDFLARE_ACCOUNT_ID` to one of the listed ids. Run `setup` again. |
 | `credential` | For repository exchange, verify `github_repository`, the host's existing GitHub identity and `BEADS_CLOUDFLARE_TRUSTED_ORIGINS`. CI needs `id-token: write` and a server-admitted main-branch workflow. Static-key installations still accept securely provided `BEADS_CLOUDFLARE_TOKEN` or operator custody through `BEADS_ADMIN_TOKEN`. |
+| `agent key check` | Setup kept the existing key and requested no replacement. For HTTP403, check its read scope and tracker grants; for a connection or server failure, wait for recovery and run `setup` again. Only HTTP401 permits replacement. |
 | `install bd` | Another file is at the install path (it is never overwritten): add `--bin-dir <other dir>`. A checksum failure installed nothing: run again. |
 | `bd on PATH` | Run the printed `PATH` line (and add it to the shell profile). Another `bd` earlier on PATH must be removed or put behind it. |
 | `versions` | Run the `npx` command at the end of that line (it updates the store or bd to the matching version). |

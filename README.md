@@ -6,7 +6,7 @@
 
 [Beads](https://github.com/gastownhall/beads) is the work-item tracker for coding agents. This project keeps
 your trackers in a Cloudflare Worker that you own, so every machine, agent and CI job shares one tracker, and
-the ordinary `bd` command talks to it. You need a Cloudflare account, Node 22 or newer and the Cloudflare CLI
+the ordinary `bd` command talks to it. You need a Cloudflare account, Node 22.23.3 or newer and the Cloudflare CLI
 ([`cf`](https://developers.cloudflare.com/cf/)) on its newest release and signed in: `npm install -g cf@latest`, then
 `cf auth login`. Setup checks all three first and prints the one command that fixes whichever is missing.
 
@@ -353,8 +353,8 @@ and [artifact verification](docs/artifacts.md) for the supported boundaries. Rel
 - The test pool's bundled workerd is older than the deployed compatibility date, so `vitest.config.ts` runs tests at
   `2026-08-01`; `wrangler.jsonc` and `cloudflare.config.ts` stay at `2026-10-01`. `wrangler.jsonc` is the development and test
   configuration; `cloudflare.config.ts` is what is deployed, and `scripts/check-deploy-config.mjs` keeps the two in step.
-- `agents` 0.25.0 declares `@modelcontextprotocol/server` 2.0.0 as an exact peer; 2.2.0 is installed and works, so pnpm
-  reports an unmet peer.
+- MCP transport uses the official `@modelcontextprotocol/server` handler directly; the package does not depend on
+  `agents` or its MCP client peers.
 
 ## License
 

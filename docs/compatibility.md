@@ -66,8 +66,8 @@ the update line above instead of failing in some later request.
 
 ## Maintaining the numbers
 
-- `VERSION` is edited by hand for a release; `node scripts/sync-version.mjs` copies it into
-  `src/version.ts` and `package.json` (CI runs it with `--check`).
+- Canonical release preparation updates `VERSION` and its projections in `src/version.ts` and
+  `package.json`; `pnpm version:sync --check` verifies they match without changing them.
 - `MIN_CLIENT_VERSION` in `src/tracker/context.ts` and `MinStoreVersion` in
   `bd/cloudflare/compat.go` are edited by hand, and only under the promises above.
 - The pair proof (`scripts/pair-proof.sh`) fails when the built bd's stamp or the running

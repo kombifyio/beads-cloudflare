@@ -369,7 +369,8 @@ async function checkCloudflareCli(report, { allowOutdated }) {
 async function readContext(base, key, tracker) {
   const answer = await request("GET", `${base}/t/${tracker}/v0/beads/context`, { token: key });
   if (answer.status === 200 && answer.json) return { doc: answer.json };
-  if (answer.status === 401 || answer.status === 403) return { problem: `the store refused the key (HTTP ${answer.status})`, refused: true };
+  if (answer.status === 401) return { problem: "the store refused the key (HTTP 401)", refused: true, authenticationRejected: true };
+  if (answer.status === 403) return { problem: "the store refused the context request (HTTP 403)", refused: true };
   if (answer.status === 0) return { problem: `no answer from ${base} (${answer.error})` };
   return { problem: `the store answered HTTP ${answer.status} to its context request` };
 }
@@ -1472,7 +1473,16 @@ export async function setupCommand(flag, positional) {
   let newKey = false;
   if (key) {
     const check = await readContext(origin, key, "doctor-handshake");
-    if (check.problem) key = undefined;
+    if (check.authenticationRejected) key = undefined;
+    else if (check.problem) {
+      // A rollout or a scope/tracker refusal does not prove the credential is invalid.
+      // Keep custody intact and stop before the admin key-creation request.
+      report.fail("agent key check", check.problem, [
+        "the existing key was kept; no replacement key was requested",
+        `for HTTP 403, check the key's read scope and tracker grants; otherwise wait for the store to recover, then run: ${NPX} setup`,
+      ]);
+      return report.finish("setup");
+    }
   }
   if (!key) {
     const created = await createKey(origin, state.admin_token ?? process.env.BEADS_ADMIN_TOKEN, `agent-${deriveTrackerId(hostname()) || "host"}`);
