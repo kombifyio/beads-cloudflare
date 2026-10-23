@@ -6,9 +6,10 @@ import { addDependencies, removeDependency } from "./edges";
 import { listEvents, type Ctx } from "./events";
 import { addComment, createIssue, getIssue, idCandidates, listIssues, updateIssue, type GetOptions, type ListQuery } from "./issues";
 import { claimIssue, claimNext, closeIssue, heartbeatIssue, reclaimExpiredLeases, releaseIssue, reopenIssue } from "./lifecycle";
+import { hasExpiredClaims, migrateLegacyClaims, releaseExpiredClaims } from "./claims";
 import { forgetMemory, getMemory, listMemories, rememberMemory } from "./memories";
 import { authenticateKey, generateKey, insertKey, insertExchangeKey, listKeys, revokeKey, type KeyInfo, type KeyRequest, type NewKey } from "./keys";
-import { forbiddenTracker, Refusal, refuse, problemOut } from "./problem";
+import { forbiddenTracker, Refusal, refuse, problemOut, rejectedWrite } from "./problem";
 import type { Out } from "./problem";
 import { countReady, listReady, type ReadyFilter } from "./ready";
 import { migrateColumns, normalizeRows, SCHEMA, SCHEMA_VERSION } from "./schema";
@@ -23,6 +24,7 @@ import { queryIssues } from "./query";
 import { isTrackerId, nowIso, safeJson, setOwn, type Json } from "./util";
 import { advanceTrackerRevision, trackerRevision } from "./revision";
 import { contextFor } from "./context";
+import { HealthMeter, type HealthSample } from "./health";
 
 export type WriteOp =
   | "createIssue" | "updateIssue" | "closeIssue" | "reopenIssue" | "claimIssue" | "releaseIssue" | "claimNextIssue"
@@ -77,6 +79,7 @@ export class TeamStore extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   private lastPrune = 0;
   private lastExchangePrune = 0;
+  private readonly meter = new HealthMeter();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -87,15 +90,42 @@ export class TeamStore extends DurableObject<Env> {
     migrateColumns(this.sql);
     normalizeRows(this.sql);
     this.sql.exec("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)", String(SCHEMA_VERSION));
+    // Locks that predate real claims are released once, before the first request sees them.
+    // A failure rolls the migration back and is retried at the next activation; it must never keep the store down.
+    try {
+      const migrated = this.ctx.storage.transactionSync(() => migrateLegacyClaims(this.sql, nowIso()));
+      if (migrated) console.log(JSON.stringify({ event: "claims_migrated", ...migrated }));
+    } catch (e) {
+      console.error(JSON.stringify({ event: "claims_migration_failed", error: e instanceof Error ? e.message : String(e) }));
+    }
+  }
+
+  /**
+   * Releases the tracker's lapsed claims before a request looks at it, in a transaction of their own so a refused
+   * write cannot roll the release back. Returns how many claims it released.
+   */
+  private releaseLapsed(tracker: string): number {
+    const now = nowIso();
+    if (!hasExpiredClaims(this.sql, tracker, now)) return 0;
+    return this.ctx.storage.transactionSync(() => releaseExpiredClaims(this.sql, tracker, now));
+  }
+
+  /** The scheduled sweep: every tracker's lapsed claims, so an idle tracker shows the truth too. */
+  releaseLapsedClaims(): { tracker: string; released: number }[] {
+    const trackers = this.sql.exec<{ tracker: string }>("SELECT DISTINCT tracker FROM issues WHERE status = 'in_progress' AND lease_expires_at IS NOT NULL").toArray();
+    return trackers.map(({ tracker }) => ({ tracker, released: this.releaseLapsed(tracker) })).filter((r) => r.released > 0);
   }
 
   read(op: ReadOp, call: Call): Out {
     if (!isTrackerId(call.tracker)) return badTracker();
     if (!trackerAllowed(call.principal, call.tracker)) return forbiddenTracker(call.tracker);
+    this.meter.request();
     try {
+      this.releaseLapsed(call.tracker);
       return this.runRead(op, call);
     } catch (e) {
       if (e instanceof Refusal) return e.out;
+      this.meter.failure();
       throw e;
     }
   }
@@ -104,12 +134,18 @@ export class TeamStore extends DurableObject<Env> {
     if (!isTrackerId(call.tracker)) return badTracker();
     if (!trackerAllowed(call.principal, call.tracker)) return forbiddenTracker(call.tracker);
     const now = nowIso();
+    const started = Date.now();
+    this.meter.request();
     // Hashing is async in workerd, so id candidates are prepared before the synchronous transaction.
     const candidates = await this.candidatesFor(op, call, now);
     try {
-      return this.ctx.storage.transactionSync(() => this.runWrite(op, call, now, candidates));
+      this.releaseLapsed(call.tracker);
+      const out = this.ctx.storage.transactionSync(() => this.runWrite(op, call, now, candidates));
+      this.meter.write(Date.now() - started);
+      return out;
     } catch (e) {
-      if (e instanceof Refusal) return e.out;
+      if (e instanceof Refusal) return rejectedWrite(e.out);
+      this.meter.failure();
       throw e;
     }
   }
@@ -163,6 +199,17 @@ export class TeamStore extends DurableObject<Env> {
   contextOf(tracker: string) {
     if (!isTrackerId(tracker)) throw refuse("invalid_argument", "invalid tracker");
     return contextFor(tracker, projectIdOf(this.sql, tracker), trackerRevision(this.sql, tracker));
+  }
+
+  /** Storage figures read now plus the request, error and write-latency figures since the previous sample. */
+  healthSample(): HealthSample {
+    const n = (table: string) => this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n;
+    return {
+      at: nowIso(),
+      storage_bytes: this.sql.databaseSize,
+      rows: { issues: n("issues"), events: n("events"), comments: n("comments"), dependencies: n("dependencies") },
+      ...this.meter.drain(),
+    };
   }
 
   /** Issue counts per tracker and status, for an operator checking a migration. */

@@ -50,12 +50,18 @@ const OPERATION_TOKENS = [
 
 // Behavior tokens: `project.enforce` is upstream's; the `profile.*` ones declare this profile's extensions.
 const BEHAVIOR_TOKENS = [
+  "profile.actionable_work",
   "profile.apply_batch_extensions",
+  "profile.batch_close_fencing",
+  "profile.batch_comment_id",
   "profile.beads-cloudflare",
+  "profile.claim_inspection",
+  "profile.claim_lock_v1",
   "profile.config_post",
   "profile.dependencies_export",
   "profile.heartbeat",
   "profile.idempotency_key",
+  "profile.identity_inspection",
   "profile.import",
   "profile.import_merge",
   "profile.import_migration_guard_v1",
@@ -64,6 +70,7 @@ const BEHAVIOR_TOKENS = [
   "profile.leases_reclaim",
   "profile.logical_recovery_v1",
   "profile.optimistic_concurrency",
+  "profile.rejected_write_outcome",
   "profile.x_extra",
   "project.enforce",
 ];

@@ -1,7 +1,7 @@
 // Claim, release, close, reopen and claimNext, following upstream Beads v1.3.1 plus the declared
 // lease/fencing extension (see docs/profile.md and docs/semantics.md).
 import { boundedText, checkMembers, nameMember, optBool, optInt } from "./body";
-import { claimHolder, guardClaim, leaseExpired, staleClaim } from "./claims";
+import { DEFAULT_LEASE_SECONDS, MAX_LEASE_SECONDS, claimHolder, guardClaim, heldByOther, isHolder, leaseExpired, liveClaim, staleClaim, workerOf } from "./claims";
 import { recordEvent, type Ctx } from "./events";
 import { all, hydratedIssue, issueJson, issueWithCounts, loadIssue, type IssueRow } from "./model";
 import { invalid, issueNotFound, refuse } from "./problem";
@@ -9,9 +9,6 @@ import type { Out } from "./problem";
 import { hasLiveBlocker, readyCandidates, unblocked, type ReadyFilter } from "./ready";
 import { etagOf, idIsAddressable, openChildren, parseVersionToken } from "./issues";
 import type { Json } from "./util";
-
-export const DEFAULT_LEASE_SECONDS = 30 * 60;
-const MAX_LEASE_SECONDS = 24 * 3600;
 
 function leaseSeconds(body: Json): number {
   const seconds = optInt(body, "x_lease_seconds");
@@ -52,7 +49,7 @@ function checkVersion(row: IssueRow, expected: string | undefined): void {
  * asserted name as decoration.
  */
 function claimAssignee(ctx: Ctx): string {
-  return ctx.clientActor ?? ctx.actor;
+  return workerOf(ctx);
 }
 
 function takeClaim(ctx: Ctx, row: IssueRow, seconds: number): IssueRow {
@@ -74,26 +71,25 @@ export function claimIssue(ctx: Ctx, id: string, body: Json): Out {
   ctx.clientActor = nameMember(body, "actor");
   const seconds = leaseSeconds(body);
   const row = requireRow(ctx, id);
-  const expired = leaseExpired(row, ctx.now);
 
-  // The holder asking again: nothing changes, but the lease is renewed (extension).
-  if (row.status === "in_progress" && !expired && row.assignee === claimAssignee(ctx)) {
-    guardClaim(ctx, row);
-    if (row.lease_expires_at) {
-      const expires = new Date(Date.parse(ctx.now) + seconds * 1000).toISOString();
-      ctx.sql.exec(
-        "UPDATE issues SET lease_expires_at = ?3, updated_at = ?4, version = version + 1 WHERE tracker = ?1 AND id = ?2",
-        ctx.tracker, id, expires, ctx.now,
-      );
-      recordEvent(ctx, { op: "update", kind: "lease_renewed", issueId: id });
-    }
+  // A live claim: the holder asking again renews it (extension), anyone else is refused.
+  if (liveClaim(row, ctx.now)) {
+    if (!isHolder(ctx, row)) throw heldByOther(ctx, row, "claim");
+    const expires = new Date(Date.parse(ctx.now) + seconds * 1000).toISOString();
+    ctx.sql.exec(
+      "UPDATE issues SET lease_expires_at = ?3, heartbeat_at = ?4, updated_at = ?4, version = version + 1 WHERE tracker = ?1 AND id = ?2",
+      ctx.tracker, id, expires, ctx.now,
+    );
+    recordEvent(ctx, { op: "update", kind: "lease_renewed", issueId: id });
     const same = loadIssue(ctx.sql, ctx.tracker, id)!;
     return { status: 200, body: { issue: issueJson(same), already_claimed: true, x_fencing_token: same.fencing }, etag: etagOf(same.version) };
   }
-  if (row.assignee !== "" && row.assignee !== claimAssignee(ctx) && !expired) {
+  // A lapsed claim (or a status set by hand, with no lease behind it) holds nobody; an assignment does.
+  const lapsed = leaseExpired(row, ctx.now);
+  if (row.assignee !== "" && row.assignee !== claimAssignee(ctx) && !lapsed) {
     throw refuse("already_claimed", "issue is claimed by another actor", { assignee: row.assignee, issue_status: row.status });
   }
-  if (row.status !== "open" && !expired) {
+  if (row.status !== "open" && !lapsed) {
     throw refuse("not_claimable", "issue is not in a claimable state", { issue_status: row.status });
   }
   const claimed = takeClaim(ctx, row, seconds);
@@ -121,16 +117,9 @@ export function heartbeatIssue(ctx: Ctx, id: string, body: Json): Out {
   const row = requireRow(ctx, id);
   if (row.ephemeral) throw refuse("not_claimable", "a wisp is ephemeral and is never leased, so it has no lease to renew");
   if (row.status !== "in_progress" || row.lease_expires_at === null) {
-    throw refuse("not_claimable", "this issue is not in progress under a lease", { issue_status: row.status });
+    throw refuse("not_claimable", "this issue is not in progress under a lease: it was never claimed, or its lease lapsed and it was released; claim it again with `bd update --claim`", { issue_status: row.status });
   }
-  if (claimHolder(row) !== ctx.actor) {
-    throw refuse("already_claimed", "this issue is claimed by another principal whose lease is still live", {
-      reason: "claimed_by_other",
-      assignee: row.assignee,
-      x_claimed_by: claimHolder(row),
-      issue_status: row.status,
-    });
-  }
+  if (!isHolder(ctx, row)) throw heldByOther(ctx, row, "renew");
   const expires = new Date(Date.parse(ctx.now) + seconds * 1000).toISOString();
   ctx.sql.exec(
     `UPDATE issues SET lease_expires_at = ?3, heartbeat_at = ?4, updated_at = ?4, version = version + 1
@@ -246,7 +235,10 @@ export function releaseIssue(ctx: Ctx, id: string, body: Json): Out {
   const token = fencingToken(body);
 
   const row = requireRow(ctx, id);
-  const bump = guardClaim(ctx, row, { token, force });
+  // Naming the holder (`expected_assignee`) is how a supervisor with the same credential gives a worker's claim back;
+  // the name is checked against the row below, so a stale name is still refused.
+  const supervisor = expected !== undefined && claimHolder(row) === ctx.actor;
+  const bump = guardClaim(ctx, row, { token, force: force || supervisor }, "release");
   if (row.status !== "open" && row.status !== "in_progress") throw notReleasable();
   if (expected === undefined && row.assignee === "") throw notReleasable();
   if (expected !== undefined) {
@@ -256,7 +248,8 @@ export function releaseIssue(ctx: Ctx, id: string, body: Json): Out {
         expected_assignee: expected,
       });
     }
-  } else if (!force && claimHolder(row) !== ctx.actor) {
+  } else if (!force && !isHolder(ctx, row)) {
+    if (liveClaim(row, ctx.now)) throw heldByOther(ctx, row, "release");
     throw refuse("already_claimed", "this issue is held by another actor; send `force`, or name the holder in `expected_assignee`");
   }
 
@@ -307,7 +300,7 @@ export function closeRow(ctx: Ctx, row: IssueRow, input: CloseInput): { alreadyC
   checkVersion(row, input.expected);
   const alreadyClosed = row.status === "closed";
   if (alreadyClosed && input.token !== undefined && input.token !== row.fencing) throw staleClaim(input.token, row.fencing);
-  const bump = alreadyClosed ? 0 : guardClaim(ctx, row, { token: input.token });
+  const bump = alreadyClosed ? 0 : guardClaim(ctx, row, { token: input.token }, "close");
   const children = openChildren(ctx.sql, ctx.tracker, id);
   if (!input.force) {
     if (children > 0) {

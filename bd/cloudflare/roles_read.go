@@ -2,6 +2,7 @@ package cloudflare
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -288,6 +289,7 @@ func listQuery(req issueops.ListRequest, wireSort string, serverBrief bool) *que
 		list("label_any", req.LabelsAny).
 		list("exclude_label", req.ExcludeLabels).
 		str("parent", req.ParentID).
+		str("external_ref", req.ExternalRef).
 		flag("brief", serverBrief).
 		flag("all", all).
 		flag("include_templates", req.IncludeTemplates || req.IncludeAllTypes).
@@ -359,6 +361,15 @@ func (r readerRole) listSelected(ctx context.Context, req issueops.ListRequest, 
 	}
 
 	items, err := r.every(ctx, req, q, wireSort, serverBrief, sel.needsBlocked)
+	// Older stores strictly reject this optional query member. Only that typed
+	// refusal may retry the read without it; the local exact predicate still
+	// checks every page. Authentication, transport and other refusals propagate.
+	var problem *Problem
+	if q.v.Has("external_ref") && errors.As(err, &problem) && problem.Status == http.StatusBadRequest &&
+		problem.Code == "invalid_argument" && problem.Param == "external_ref" && problem.Reason == "unknown_parameter" {
+		q.v.Del("external_ref")
+		items, err = r.every(ctx, req, q, wireSort, serverBrief, sel.needsBlocked)
+	}
 	if err != nil {
 		return issueops.IssuePage{}, err
 	}

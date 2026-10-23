@@ -16,12 +16,14 @@ import (
 // every typed extension member a role needs to rebuild the sentinel or typed
 // error the in-tree store would have returned.
 type Problem struct {
-	Status int    `json:"status"`
-	Title  string `json:"title"`
-	Code   string `json:"code"`
-	Detail string `json:"detail"`
-	Param  string `json:"param"`
-	Reason string `json:"reason"`
+	Status          int    `json:"status"`
+	Title           string `json:"title"`
+	Code            string `json:"code"`
+	Detail          string `json:"detail"`
+	Param           string `json:"param"`
+	Reason          string `json:"reason"`
+	Outcome         string `json:"x_outcome"`
+	MutationApplied *bool  `json:"x_mutation_applied"`
 
 	ActualAssignee    *string `json:"actual_assignee"`
 	ActualStatus      *string `json:"actual_status"`
@@ -55,6 +57,12 @@ func (p *Problem) Error() string {
 // the backend cannot perform, so callers get a denial rather than a fault.
 func (p *Problem) Refused() bool {
 	return p.Status >= 400 && p.Status < 500
+}
+
+// RejectedWithoutMutation is true only when the store confirmed that the write
+// transaction rolled back. HTTP status alone cannot establish this after a lost acknowledgement.
+func (p *Problem) RejectedWithoutMutation() bool {
+	return p.Refused() && p.Outcome == "rejected" && p.MutationApplied != nil && !*p.MutationApplied
 }
 
 // apiError carries a Problem together with the Beads error the in-tree store

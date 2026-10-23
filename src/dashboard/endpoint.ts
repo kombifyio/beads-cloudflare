@@ -2,14 +2,25 @@ import { scopeRefusal, type ApiContext } from '../auth/provider';
 import { trackerAllowed, type Principal } from '../auth/scopes';
 import { handleTracker } from '../http/endpoint';
 import { portfolioCatalog } from './catalog';
+import { portfolioLabels } from './labels';
+import { isOperatorViewer } from '../admin/endpoint';
+import { breaches, thresholdsFrom } from '../tracker/health';
+import { dayEarlier, latestHealthSample } from '../tracker/health-check';
 import { collectPortfolio, mapBounded, totalsOf, type Snapshot, type TrackerRead } from './data';
+import { collectMilestones } from './milestones';
 import { breakdown, collectScopes, readIssues, type Breakdown } from './modules';
+import { fetchRoadmap, linkBeads, parseRoadmap, roadmapSources, RoadmapSourceError } from './roadmap';
+import { readStatePage, stateAllowed, stateSource } from './state';
 
 const MODULES_PREFIX = 'portfolio:modules:';
 const MODULES_TTL = 300;
+const MILESTONES_PREFIX = 'portfolio:milestones:';
+const ROADMAP_PREFIX = 'portfolio:roadmap:';
+const STATE_KEY = 'portfolio:state';
 
 const HISTORY_PREFIX = 'portfolio:daily:';
 const HISTORY_DAYS = 400;
+const digest = async (text: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].slice(0,12).map(b => b.toString(16).padStart(2,'0')).join('');
 const json = (body: unknown, status = 200) => Response.json(body,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 
 export function nativeReader(env: Env, ctx: ApiContext): TrackerRead {
@@ -62,13 +73,77 @@ export async function handlePortfolio(request: Request, env: Env, ctx: ApiContex
           const repositories = point.repositories.filter(repo => catalog.some(current => current.id === repo.id && current.tracker === repo.tracker));
           return {...point,repositories,totals:totalsOf(repositories)};
         }).filter(point => point.repositories.length > 0) } : undefined;
-      return json({...snapshot,title:env.PORTFOLIO_TITLE || 'Beads portfolio',history,
+      return json({...snapshot,title:env.PORTFOLIO_TITLE || 'Beads portfolio',labels:portfolioLabels(env),history,
         viewer:{name:ctx.props.name,email:ctx.props.email},
         ...(archive ? {archive} : {}),
         source:{authority:'cloudflare',partial:snapshot.repositories.some(repo => repo.error),historyStartedAt:history[0]?.generatedAt ?? null}});
     }
+    if (url.pathname === '/portfolio/milestones') {
+      // Shared cache holds only the projection of the catalog this principal may read, so it is keyed by tracker set.
+      const key = MILESTONES_PREFIX + await digest(catalog.map(repo => repo.tracker).sort().join(','));
+      const cached = url.searchParams.get('fresh') === 'true' ? null : await env.OAUTH_KV.get(key,'json');
+      if (cached) return json(cached);
+      const report = await collectMilestones(catalog,read,mapBounded);
+      if (!report.repositories.some(repo => repo.error)) await env.OAUTH_KV.put(key,JSON.stringify(report),{expirationTtl:MODULES_TTL});
+      return json(report);
+    }
+    if (url.pathname === '/portfolio/health') {
+      // Operators only, from the hourly series: reading here must not drain the live interval counters.
+      if (!isOperatorViewer(env,ctx)) return json({error:'not_found'},404);
+      const sample = await latestHealthSample(env);
+      const thresholds = thresholdsFrom(env);
+      const previous = sample ? await dayEarlier(env,sample) : null;
+      const growth = sample && previous && Date.parse(sample.at) > Date.parse(previous.at)
+        ? (sample.storage_bytes - previous.storage_bytes) / ((Date.parse(sample.at) - Date.parse(previous.at)) / 86_400_000) : null;
+      return json({sample,thresholds,growth_bytes_per_day:growth,breached:sample ? breaches(sample,thresholds,previous ?? undefined) : []});
+    }
     if (url.pathname === '/portfolio/scopes') {
       return json({generatedAt:new Date().toISOString(),...await collectScopes(catalog,read,mapBounded)});
+    }
+    if (url.pathname === '/portfolio/state') {
+      const source = stateSource(env);
+      if (!source || !stateAllowed(catalog,source)) return json({error:'not_found'},404);
+      // One shared copy: the page is the same for every viewer admitted above.
+      const cached = url.searchParams.get('fresh') === 'true' ? null : await env.OAUTH_KV.get(STATE_KEY,'json');
+      if (cached) return json(cached);
+      try {
+        const result = await readStatePage(env,source);
+        if (!result.missing) await env.OAUTH_KV.put(STATE_KEY,JSON.stringify(result),{expirationTtl:MODULES_TTL});
+        return json(result);
+      } catch (error) {
+        if (error instanceof RoadmapSourceError) return json({error:error.code},503);
+        throw error;
+      }
+    }
+    if (url.pathname === '/portfolio/roadmaps') {
+      return json({repositories:roadmapSources(env,catalog).map(({id,name,repository,group,catalogId}) => ({id,name,repository,group,catalogId}))});
+    }
+    const roadmap = /^\/portfolio\/roadmaps\/([^/]+)$/.exec(url.pathname);
+    if (roadmap) {
+      const source = roadmapSources(env,catalog).find(row => row.id === decodeURIComponent(roadmap[1]!));
+      if (!source) return json({error:'not_found'},404);
+      // Shared per repository: tracker access was checked above, and the cache holds only that repository's projection.
+      const key = ROADMAP_PREFIX + source.id;
+      const cached = url.searchParams.get('fresh') === 'true' ? null : await env.OAUTH_KV.get(key,'json');
+      if (cached) return json(cached);
+      try {
+        const head = {id:source.id,name:source.name,repository:source.repository,group:source.group,catalogId:source.catalogId,fetchedAt:new Date().toISOString()};
+        const file = await fetchRoadmap(env,source);
+        if (!file) return json({...head,missing:true});
+        const parsed = parseRoadmap(file.markdown);
+        let beads: {extraEpics: unknown[]; uncovered: number; truncated: boolean; error?: string} = {extraEpics:[],uncovered:0,truncated:false};
+        try {
+          const {items, truncated} = await readIssues(source.tracker,read);
+          beads = {...linkBeads(parsed,items,source.name,source.shared),truncated};
+        } catch { beads.error = 'tracker_unavailable'; }
+        const result = {...head,url:file.url,sha:file.sha,lastChanged:file.lastChanged,commitUrl:file.commitUrl,lastVerified:parsed.lastVerified,
+          target:parsed.target,milestones:parsed.milestones,markdown:file.markdown,...beads};
+        if (!beads.error) await env.OAUTH_KV.put(key,JSON.stringify(result),{expirationTtl:MODULES_TTL});
+        return json(result);
+      } catch (error) {
+        if (error instanceof RoadmapSourceError) return json({error:error.code},503);
+        throw error;
+      }
     }
     const modules = /^\/portfolio\/repositories\/([^/]+)\/modules$/.exec(url.pathname);
     if (modules) {

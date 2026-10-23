@@ -45,6 +45,17 @@ test("an authorized clone exchanges once and reuses only its own unexpired track
   assert.equal(calls, 1);
 });
 
+test("past half-life a refused renewal keeps the held credential and a granted one replaces it", async () => {
+  const env = { GH_TOKEN: "identity-fixture", BEADS_CLOUDFLARE_TRUSTED_ORIGINS: base };
+  const held = { token: "held-key", expires_at, renew_at: new Date(Date.now() - 1000).toISOString() };
+  const credentials = { [base]: { github: { "team/project#project": held } } };
+  const throttled = await resolveGithubCredential({ base, repository, tracker, env, credentials, fetchImpl: async () => new Response(null, { status: 403 }) });
+  assert.equal(throttled.token, "held-key");
+  const renewed = await resolveGithubCredential({ base, repository, tracker, env, credentials, fetchImpl: async () => Response.json({ token, expires_at }) });
+  assert.equal(renewed.token, token);
+  assert.ok(Date.parse(renewed.renew_at) > Date.now() && Date.parse(renewed.renew_at) < Date.parse(expires_at));
+});
+
 test("exchange errors and server responses cannot expose the supplied GitHub identity", async () => {
   const env = { GH_TOKEN: "never-print-this-identity", BEADS_CLOUDFLARE_TRUSTED_ORIGINS: base };
   for (const fetchImpl of [async () => { throw new Error(env.GH_TOKEN); }, async () => new Response(env.GH_TOKEN, { status: 403 }), async () => Response.json({ token, expires_at: "2000-01-01T00:00:00Z" })]) {

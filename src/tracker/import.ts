@@ -37,7 +37,7 @@ const EXTRA_MEMBERS = [
   "event_kind", "actor", "target", "payload",
 ];
 /** Members of an exported record that are derived on read, so they carry no information to store. */
-const DERIVED_MEMBERS = ["is_blocked", "dependency_count", "dependent_count", "comment_count", "parent", "revision", "comments_omitted", "lease_granted_node", "dependents", "epic_total_children", "epic_closed_children", "epic_closeable"];
+const DERIVED_MEMBERS = ["x_claim", "is_blocked", "dependency_count", "dependent_count", "comment_count", "parent", "revision", "comments_omitted", "lease_granted_node", "dependents", "epic_total_children", "epic_closed_children", "epic_closeable"];
 const COLUMN_MEMBERS = [
   "id", "title", "description", "design", "acceptance_criteria", "notes", "status", "priority", "issue_type", "assignee", "owner",
   "estimated_minutes", "created_at", "created_by", "updated_at", "started_at", "closed_at", "close_reason", "closed_by_session", "external_ref",

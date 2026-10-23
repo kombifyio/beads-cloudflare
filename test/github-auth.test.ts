@@ -56,7 +56,7 @@ it("exchanges verified GitHub write access for a reusable tracker-scoped credent
   expect(first.headers.get("Cache-Control")).toBe("no-store");
   const credential = await first.json() as { token: string; expires_at: string };
   const ttl = Date.parse(credential.expires_at) - Date.now();
-  expect(ttl).toBeGreaterThan(0); expect(ttl).toBeLessThanOrEqual(3600_000);
+  expect(ttl).toBeGreaterThan(0); expect(ttl).toBeLessThanOrEqual(24 * 3600_000 + 60_000);
   const repeat = await (await exchange()).json() as typeof credential;
   expect(repeat.token).toBe(credential.token);
   const created = await call("POST", "/t/github/v0/beads/issues", credential.token, { actor: "agent", title: "authorized GitHub agent", issue_type: "task" });
@@ -195,11 +195,13 @@ it.each([302, 401, 403, 429, 500])("denies GitHub failure %s without forwarding 
   expect(response.headers.get("Location")).toBeNull();
 });
 
-it("keeps credential lifetime above a minute at issuance-window boundaries", () => {
-  const edge = 59 * 60_000;
-  for (const now of [edge - 1, edge, edge + 1]) {
-    const ttl = Date.parse(githubCredentialExpiry(now)) - now;
-    expect(ttl).toBeGreaterThan(60_000); expect(ttl).toBeLessThanOrEqual(3600_000);
+it("issues 12-24 h credentials whose half-life renewal receives a later key", () => {
+  const window = 12 * 3600_000;
+  for (const now of [window - 1, window, window + 1, 5 * window + window / 2]) {
+    const expiry = Date.parse(githubCredentialExpiry(now));
+    expect(expiry - now).toBeGreaterThan(window); expect(expiry - now).toBeLessThanOrEqual(2 * window + 60_000);
+    const renewal = now + (expiry - now) / 2;
+    expect(Date.parse(githubCredentialExpiry(renewal))).toBeGreaterThan(expiry);
   }
 });
 
@@ -242,6 +244,8 @@ it("accepts a signed GitHub Actions identity only for an operator-granted main w
   expect(immutable.status).toBe(200);
   const relativePolicy = JSON.stringify({ [repository]: { trackers: ["github"], oidc: { repository_id: "5678", workflow_refs: [".github/workflows/beads.yml@refs/heads/main"] } } });
   expect((await exchange(undefined, relativePolicy, token)).status).toBe(200);
+  const bareName = JSON.stringify({ [repository]: { trackers: ["github"], oidc: { repository_id: "5678", workflow_refs: ["beads.yml"] } } });
+  expect((await exchange(undefined, bareName, token)).status).toBe(200);
   for (const claims of [{ repository_id: "different" }, { repository: "fork/project" }, { aud: "https://evil.test" },
     { workflow_ref: `${repository}/.github/workflows/other.yml@refs/heads/main` }, { ref: "refs/pull/1/merge" },
     { event_name: "pull_request_target" }, { event_name: "pull_request" }, { exp: 0 }, { iss: "https://evil.test" },
@@ -250,4 +254,43 @@ it("accepts a signed GitHub Actions identity only for an operator-granted main w
   }
   expect((await exchange(undefined, oidcConfigured, await oidcToken({}, true))).status).toBe(403);
   expect((await exchange(undefined, configured, token)).status).toBe(403);
+});
+
+// Sensitive boundary: a portfolio reader workflow reads mapped trackers one at a time and never inherits a writer grant.
+it("issues only a configured portfolio reader workflow read-only access to mapped trackers", async () => {
+  const reader = "example/workspace";
+  const readerPolicy = { trackers: ["workspace"], oidc: { repository_id: "8642", workflow_refs: ["bridge.yml"] }, portfolio_readers: ["state.yml"] };
+  const policy = (readerOverride: object = readerPolicy) => JSON.stringify({
+    [repository]: { trackers: ["github"], import: true, oidc: { repository_id: "5678", workflow_refs: [workflow] } }, [reader]: readerOverride });
+  const claims = { repository: reader, repository_id: "8642", workflow_ref: `${reader}/.github/workflows/state.yml@refs/heads/main`,
+    sub: `repo:${reader}:ref:refs/heads/main`, event_name: "schedule" };
+  const body = { repository, tracker: "github", credential_type: "github-portfolio-reader", reader };
+  const token = await oidcToken(claims);
+  // The previous test may have cached the signing keys; an uncached run reads this set once.
+  upstream("/.well-known/jwks", { keys: [{ ...publicJwk, kid: "test-signing-key", alg: "RS256", use: "sig" }] }, 200, undefined, 1, "https://token.actions.githubusercontent.com");
+  const response = await exchange(body, policy(), token);
+  if (replies[0]?.path === "/.well-known/jwks") replies.shift();
+  expect(response.status).toBe(200);
+  const credential = await response.json() as { token: string; expires_at: string };
+  expect(Date.parse(credential.expires_at) - Date.now()).toBeLessThanOrEqual(3600_000);
+  expect((await call("GET", "/t/github/v0/beads/ready", credential.token)).status).toBe(200);
+  expect((await call("GET", "/t/workspace/v0/beads/ready", credential.token)).status).toBe(403);
+  expect((await call("POST", "/t/github/v0/beads/issues", credential.token, { actor: "reader", title: "forbidden", issue_type: "task" })).status).toBe(403);
+  expect((await call("POST", "/t/github/v0/beads/issues:import", credential.token, {})).status).toBe(403);
+  expect((await call("GET", "/admin/keys", credential.token)).status).toBe(403);
+  const withoutReaders = { trackers: readerPolicy.trackers, oidc: readerPolicy.oidc };
+  for (const [requestBody, mapping, overrides] of [
+    [body, policy(), { workflow_ref: `${reader}/.github/workflows/bridge.yml@refs/heads/main` }],
+    [body, policy(), { workflow_ref: `${reader}/.github/workflows/other.yml@refs/heads/main` }],
+    [body, policy(), { repository_id: "9999" }], [body, policy(), { event_name: "pull_request" }], [body, policy(), { ref: "refs/heads/feature" }],
+    [{ ...body, tracker: "other" }, policy(), {}], [{ ...body, reader: repository }, policy(), {}],
+    [{ repository, tracker: "github" }, policy(), {}], [body, policy(withoutReaders), {}],
+  ] as const) expect((await exchange(requestBody, mapping, await oidcToken({ ...claims, ...overrides }))).status).toBe(403);
+  for (const malformed of [{ ...body, scopes: ["beads:write"] }, { repository, tracker: "github", reader }, { repository, tracker: "github", credential_type: "github-portfolio-reader" }]) {
+    expect((await exchange(malformed, policy(), token)).status).toBe(400);
+  }
+  for (const readerOverride of [{ trackers: ["workspace"], portfolio_readers: ["state.yml"] }, { ...readerPolicy, portfolio_readers: [] },
+    { ...readerPolicy, portfolio_readers: [`${repository}/.github/workflows/state.yml@refs/heads/main`] }]) {
+    expect((await exchange(body, policy(readerOverride), token)).status).toBe(500);
+  }
 });

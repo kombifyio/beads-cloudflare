@@ -1,12 +1,6 @@
 # Set up beads-cloudflare (for a coding agent)
 
-This keeps a team's [Beads](https://github.com/gastownhall/beads) trackers in a Cloudflare Worker the
-person owns, so every machine and agent shares one tracker through the ordinary `bd` command. Needs Node 22.23.3+
-and a Cloudflare account, plus the Cloudflare CLI (`cf`) on its newest release and signed in. Setup checks `cf` first
-and prints the fix if it is missing (`npm install -g cf@latest`), old (same command; `--allow-outdated-cf` accepts an older one
-when offline) or signed out (`cf auth login`). Everything setup does in the account goes through `cf`.
-When npx places an older bundled `cf` first on PATH, setup selects the newest valid installation it finds,
-including the updated host installation. Installing `cf@latest` globally therefore repairs that prerequisite.
+This keeps a team's [Beads](https://github.com/gastownhall/beads) trackers in a Cloudflare Worker the person owns, so every machine and agent shares one tracker through the ordinary `bd` command. Needs Node 22.23.3+, a Cloudflare account and the Cloudflare CLI (`cf`) on its newest release and signed in. Setup checks `cf` first and prints the fix if it is missing or old (`npm install -g cf@latest`; `--allow-outdated-cf` accepts an older one when offline) or signed out (`cf auth login`). It selects the newest valid `cf` on PATH, so a global `cf@latest` repairs the prerequisite even when npx bundles an older one.
 
 Run **one** command, in the repository that should use it. Do not run `bd init`.
 
@@ -56,66 +50,25 @@ checks for a Dolt database); that is expected. `npx --yes github:kombifyio/beads
 
 ## Portable GitHub authorization
 
-The store operator installs the non-secret `GITHUB_REPOSITORIES` repository-to-tracker policy described in
-[README, Automatic access](README.md#automatic-access-from-a-fresh-clone). Save that JSON object in, for example,
-`github-repositories.json`, then deploy it with this command (works in PowerShell, Bash and zsh):
+The store operator installs the non-secret `GITHUB_REPOSITORIES` repository-to-tracker policy ([README, Automatic access](README.md#automatic-access-from-a-fresh-clone)). Save the JSON object (for example as `github-repositories.json`) and deploy it:
 
 ```sh
 npx --yes github:kombifyio/beads-cloudflare setup --no-join --github-policy github-repositories.json
 ```
 
-The file contains repository names, tracker IDs and optional immutable repository IDs/workflow references,
-not credentials. `--github-policy` replaces the entire repository mapping; a file containing `{}` explicitly
-disables exchange. Omit the option to preserve the mapping read from the deployed Worker. Plain setup,
-upgrades and sign-in changes preserve the active version's `GITHUB_REPOSITORIES` and `GITHUB_READ_APP`.
-Missing authorization metadata or split traffic blocks setup before deployment. The local setup record is a
-fallback for a new store; it cannot override an existing store's unreadable policy. Automation can supply `BEADS_GITHUB_REPOSITORIES` as the
-JSON object instead; the file option takes precedence. The optional `BEADS_GITHUB_READ_APP` environment
-variable explicitly replaces the separate GitHub App reader allowlist; an empty value clears that allowlist.
+The file holds repository names, tracker IDs and optional immutable repository IDs/workflow references, never credentials. `--github-policy` replaces the whole mapping; `{}` explicitly disables exchange; omitting the option preserves the mapping read from the deployed Worker. Plain setup, upgrades and sign-in changes preserve the active `GITHUB_REPOSITORIES` and `GITHUB_READ_APP`; missing authorization metadata or split traffic blocks setup before deployment. The local setup record is only a fallback for a new store and cannot override an existing store's unreadable policy. Automation may supply `BEADS_GITHUB_REPOSITORIES` (JSON object; the file option wins); `BEADS_GITHUB_READ_APP` replaces the separate GitHub App reader allowlist (empty clears it).
 
-Developers use an existing GitHub user
-credential (`GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token --hostname github.com`); CI uses the runner's OIDC
-identity automatically when the Actions request variables are present. The server verifies authorization rather
-than accepting repository names as proof. No personal secret-manager configuration or existing per-user Beads key is needed.
+Developers use an existing GitHub credential (`GH_TOKEN`, then `GITHUB_TOKEN`, then `gh auth token --hostname github.com`); CI uses the runner's OIDC identity when the Actions request variables are present. The server verifies authorization rather than trusting repository names; no personal secret-manager configuration or per-user Beads key is needed.
 
-First repository setup:
+First repository setup, then commit the generated `.beads/metadata.json`, `.beads/cloudflare.json` and `.beads/.gitignore`:
 
 ```sh
 npx --yes github:kombifyio/beads-cloudflare join https://beads.example.com \
   --tracker project --github-repository your-team/project --trust-store
 ```
 
-Commit the generated `.beads/metadata.json`, `.beads/cloudflare.json` and `.beads/.gitignore`. Host provisioning
-explicitly trusts the store with `BEADS_CLOUDFLARE_TRUSTED_ORIGINS=https://beads.example.com` and supplies the
-host's GitHub identity. A URL in a cloned repository cannot grant that trust. Then, in every clone:
+Host provisioning must trust the store explicitly (`BEADS_CLOUDFLARE_TRUSTED_ORIGINS=https://beads.example.com`; PowerShell: `$env:BEADS_CLOUDFLARE_TRUSTED_ORIGINS = "..."`) and supply the host's GitHub identity; a URL in a cloned repository cannot grant trust. Then in every clone run `bootstrap` and `bd ready`. `bootstrap` preserves the tracked files, and `bd` exchanges or refreshes its expiring scoped key automatically. GitHub Actions jobs declare `permissions: {contents: read, id-token: write}` and the trusted origin; the store policy must list the real repository ID and exact main-branch workflow ref (PR/fork jobs and ordinary installation tokens are refused). Pin setup to an admitted `#vX.Y.Z` release on automated hosts.
 
-```sh
-npx --yes github:kombifyio/beads-cloudflare bootstrap
-bd ready
-```
+During a Dolt migration or parallel phase use `credentials --base <origin> --tracker <id> --github-repository <owner/repo>`: it authenticates without rewriting backend configuration or installing binaries, and prints no secret by default. `--json` is solely for custody callers capturing `{token, expires_at}`; never display it or write it to logs.
 
-For a Windows PowerShell host, set its trusted origin in the provisioning environment before bootstrap:
-
-```powershell
-$env:BEADS_CLOUDFLARE_TRUSTED_ORIGINS = "https://beads.example.com"
-npx --yes github:kombifyio/beads-cloudflare bootstrap
-```
-
-For Bash or zsh, use `export BEADS_CLOUDFLARE_TRUSTED_ORIGINS=https://beads.example.com` before the same command.
-
-`bootstrap` preserves those tracked files. `bd` automatically exchanges or refreshes its expiring scoped key.
-GitHub Actions jobs declare `permissions: {contents: read, id-token: write}` and the trusted origin in their
-workflow. The store policy must list the real repository ID and the exact main-branch workflow reference. PR/fork
-jobs and ordinary installation tokens are refused. Pin setup to an admitted `#vX.Y.Z` release for automated hosts.
-
-During a Dolt migration or parallel phase use `credentials --base <origin> --tracker <id> --github-repository <owner/repo>`;
-it authenticates without rewriting backend configuration or installing binaries. Its default output contains no secret.
-`--json` is solely for custody callers that capture `{token, expires_at}`; never display that output or write it to logs.
-
-`doctor` and normal setup readiness check the actual first `bd` on PATH, read authenticated tracker context and
-run `bd --readonly ready --json` through that binary. A later matching binary cannot hide an incompatible PATH winner,
-and a failed binary read fails readiness. `doctor --bd-path <path>` explicitly checks a selected binary instead.
-These checks perform no tracker writes. To explicitly
-exercise a write round trip, `doctor --scratch` needs a development key admitted to scratch trackers. A scoped
-repository credential intentionally cannot write there. This distinction lets fresh clones and CI verify access
-without granting wider tracker rights or mutating operational data.
+`doctor` and normal setup readiness check the first `bd` actually on PATH, read authenticated tracker context and run `bd --readonly ready --json` through that binary, so a later matching binary cannot hide an incompatible PATH winner and a failed binary read fails readiness (`doctor --bd-path <path>` checks a chosen binary). These checks write nothing. `doctor --scratch` explicitly runs a write round trip and needs a development key admitted to scratch trackers; a scoped repository credential intentionally cannot write there, which lets fresh clones and CI verify access without wider rights.

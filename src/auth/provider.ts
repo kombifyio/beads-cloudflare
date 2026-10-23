@@ -7,8 +7,10 @@ import { handleAdmin } from "../admin/endpoint";
 import { handleMcp } from "../mcp/endpoint";
 import { handleTracker } from "../http/endpoint";
 import { handlePortfolio } from "../dashboard/endpoint";
+import { handleActionablePortfolio } from "../portfolio/endpoint";
 import { resolveExternalToken } from "./external";
 import { authHandler } from "./handler";
+import { signedInTrackers } from "./github";
 import { effectiveScopes, SCOPE_IMPORT, SCOPE_READ, SCOPE_WRITE, SCOPES_SUPPORTED, type Principal } from "./scopes";
 
 export type ApiContext = OAuthResourceContext<Principal>;
@@ -20,12 +22,25 @@ export function scopeRefusal(ctx: ApiContext, needsWrite: boolean, needsImport =
   return needed.every((scope) => held.includes(scope)) ? undefined : insufficientScope(ctx.auth, needed);
 }
 
+/** OAuth grants carry no tracker list of their own; the repository policy bounds them (keys keep theirs). */
+export function withTrackerPolicy(env: Env, ctx: ApiContext): ApiContext {
+  if (ctx.props.kind) return ctx;
+  const trackers = signedInTrackers(env);
+  return trackers ? { ...ctx, props: { ...ctx.props, trackers } } : ctx;
+}
+
+type ApiFetch = (request: Request, env: Env, ctx: ApiContext) => Promise<Response>;
+const api = (handler: ApiFetch) => ({
+  fetch: (request: Request, e: Env, ctx: ExecutionContext) => handler(request, e, withTrackerPolicy(e, ctx as unknown as ApiContext)),
+});
+
 export function providerOptions(env: Env): OAuthProviderOptions<Env> {
   return {
     apiHandlers: {
-      "/portfolio/": { fetch: (request, e, ctx) => handlePortfolio(request, e, ctx as unknown as ApiContext) },
-      "/mcp": { fetch: (request, e, ctx) => handleMcp(request, e, ctx as unknown as ApiContext) },
-      "/t/": { fetch: (request, e, ctx) => handleTracker(request, e, ctx as unknown as ApiContext) },
+      "/portfolio/actionable": api(handleActionablePortfolio),
+      "/portfolio/": api(handlePortfolio),
+      "/mcp": api(handleMcp),
+      "/t/": api(handleTracker),
       "/admin/": { fetch: (request, e, ctx) => handleAdmin(request, e, ctx as unknown as ApiContext) },
     },
     defaultHandler: authHandler as unknown as ExportedHandler<Env>,

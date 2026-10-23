@@ -2,7 +2,16 @@
 import type { components } from "../generated/openapi.v0";
 import { safeObject, type Json } from "./util";
 
-export type Issue = components["schemas"]["Issue"];
+export interface ClaimInspection {
+  state: "none" | "unleased" | "live" | "expired";
+  verified_principal: string | null;
+  assignee: string;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  fencing_token: number;
+  reclaimable: boolean;
+}
+export type Issue = components["schemas"]["Issue"] & { x_claim?: ClaimInspection };
 export type IssueWithCounts = components["schemas"]["IssueWithCounts"];
 export type Dependency = components["schemas"]["Dependency"];
 export type Comment = components["schemas"]["Comment"];
@@ -129,6 +138,19 @@ export function issueJson(row: IssueRow, labels: string[] = [], extra: { brief?:
   if (row.status === "in_progress" && row.lease_expires_at) out.lease_expires_at = row.lease_expires_at;
   // When the holder last proved it is alive. Carried on a live claim only, next to the lease.
   if (row.status === "in_progress" && row.heartbeat_at) out.heartbeat_at = row.heartbeat_at;
+  // In progress without a live lease is "unleased" (a status set by hand) or "expired" (a lapsed lease the next
+  // request releases); neither holds the issue, both can be claimed by anyone.
+  const inProgress = row.status === "in_progress";
+  const expired = inProgress && row.lease_expires_at !== null && row.lease_expires_at <= new Date().toISOString();
+  out.x_claim = {
+    state: !inProgress ? "none" : row.lease_expires_at === null ? "unleased" : expired ? "expired" : "live",
+    verified_principal: row.claimed_by || null,
+    assignee: row.assignee,
+    lease_expires_at: row.lease_expires_at,
+    heartbeat_at: row.heartbeat_at,
+    fencing_token: row.fencing,
+    reclaimable: inProgress && (row.lease_expires_at === null || expired),
+  };
   if (row.due_at) out.due_at = row.due_at;
   if (row.defer_until) out.defer_until = row.defer_until;
   if (row.external_ref) out.external_ref = row.external_ref;

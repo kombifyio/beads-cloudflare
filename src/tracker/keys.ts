@@ -139,7 +139,7 @@ export function insertKey(sql: SqlStorage, key: NewKey, req: KeyRequest, created
   return info(one<KeyRow>(sql, "SELECT * FROM api_keys WHERE id = ?", key.id)!);
 }
 
-/** Called in the TeamStore transaction: reuse an hourly key, preserving admin revocation. */
+/** Called in the TeamStore transaction: reuse a window's exchange key, preserving admin revocation. */
 export function insertExchangeKey(sql: SqlStorage, key: NewKey, req: KeyRequest, createdBy: string, now: string): KeyInfo | null {
   if (!req.expiresAt || req.expiresAt <= now) return null;
   const existing = one<KeyRow>(sql, "SELECT * FROM api_keys WHERE id = ?", key.id);

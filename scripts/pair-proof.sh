@@ -4,7 +4,7 @@
 #   node scripts/pair-proof-live.mjs
 #
 # It builds this tree's native client, checks the admitted live Worker version/source,
-# and runs smoke and upstream conformance only in the provisioner's test pool.
+# and runs smoke and profile-adjusted upstream conformance in the provisioner's test pool.
 # Completed Go JSON results allow only the eight named profile deviations. A fix
 # cannot compensate for a new failure elsewhere; process errors fail closed.
 #
@@ -73,13 +73,17 @@ echo "== smoke"
 BD="$BD" TRACKER="$SMOKE_TRACKER" SMOKE_ALLOW_REMOTE=1 bash scripts/smoke.sh || fail "the smoke script failed"
 
 # ---- 5. the upstream live conformance suite, on fresh trackers, against the baseline
-echo "== upstream conformance suite"
+echo "== profile-adjusted upstream conformance suite (two-hour lease; three-hour reclaim fixtures)"
+native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+fixture_cache=()
+if [ -n "${UPSTREAM_CACHE:-}" ]; then fixture_cache=("$(native "$UPSTREAM_CACHE")"); fi
+node scripts/prepare-conformance-fixtures.mjs "$(native "$WORK")" "${fixture_cache[@]}" || fail "conformance fixture qualification failed"
 report="$WORK/conformance.jsonl"
 (
   cd bd || exit 2
   BEADS_CLOUDFLARE_LIVE=1 BEADS_CLOUDFLARE_TRACKER="$HANDSHAKE" \
-    go test ./cloudflare/ -run '^TestLiveConformance$' -count=1 -timeout 20m -json >"$report" 2>"$WORK/conformance.stderr"
+    go test -modfile="$(native "$WORK/conformance-fixtures/conformance.mod")" ./cloudflare/ -run '^TestLiveConformance$' -count=1 -timeout 20m -json >"$report" 2>"$WORK/conformance.stderr"
 )
 conformance_exit=$?
 node scripts/conformance-result.mjs "$report" "$conformance_exit" || fail "conformance results were not admitted"
-echo "PASS: pair proof (bd $reported, store $store_version, completed named conformance results)"
+echo "PASS: pair proof (bd $reported, store $store_version, completed named profile-adjusted conformance results)"

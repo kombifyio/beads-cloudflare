@@ -31,6 +31,8 @@ export default defineConfig({
       TEAM: bindings.text("default"),
       PORTFOLIO_TITLE: bindings.text(process.env.BEADS_PORTFOLIO_TITLE || "Beads portfolio"),
       PORTFOLIO_REPOSITORIES: bindings.text(process.env.BEADS_PORTFOLIO_REPOSITORIES || ""),
+      // Optional display names {groups?, phases?} for catalog groups and roadmap phases. Empty: raw keys.
+      PORTFOLIO_LABELS: bindings.text(process.env.BEADS_PORTFOLIO_LABELS || ""),
       // Canonical public origin: the OAuth resource (token audience) and issuer.
       PUBLIC_ORIGIN: bindings.text(process.env.BEADS_PUBLIC_ORIGIN || "https://beads.example.workers.dev"),
       // Humans allowed to manage agent API keys over OAuth (comma list of emails). Empty: only the admin token.
@@ -39,6 +41,8 @@ export default defineConfig({
       GITHUB_REPOSITORIES: bindings.text(process.env.BEADS_GITHUB_REPOSITORIES ?? "{}"),
       // Exact App/installation reader allowlist, intersected with the repository/tracker grants.
       GITHUB_READ_APP: bindings.text(process.env.BEADS_GITHUB_READ_APP ?? ""),
+      // Optional generated state page { repository, path, tracker } for the dashboard State view. Empty: none.
+      STATE_PAGE: bindings.text(process.env.BEADS_STATE_PAGE ?? ""),
       // Cloudflare Access for SaaS (OIDC) issuer. Empty: sign-in is not configured and only agent API keys work.
       ACCESS_ISSUER: bindings.text(process.env.BEADS_ACCESS_ISSUER ?? ""),
       // ADMIN_TOKEN bootstraps key management for installers and operators; it is accepted on /admin/* only.

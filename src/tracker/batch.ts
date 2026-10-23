@@ -3,7 +3,7 @@
 // Upstream: internal/httpapi/{batch_create,batch_close,batch_apply}.go over issueops/{create_batch,
 // close_batch,batch_apply}.go. Each runs inside the Durable Object transaction its caller opened, so
 // "all or nothing" is a thrown Refusal: the surrounding transactionSync rolls every earlier item back.
-import { checkMembers, METADATA_KEY, nameMember, optBool, optString } from "./body";
+import { checkMembers, METADATA_KEY, nameMember, optBool, optInt, optString } from "./body";
 import { setConfig, unsetSetting } from "./config";
 import { insertEdge, reaches, recordEdgeAdded, recordEdgeRemoved } from "./edges";
 import { X_EXTRA } from "./extra";
@@ -350,7 +350,7 @@ function applyUpdate(run: Run, plan: Plan, actor: string, at: string, touch: (id
 function applyClose(run: Run, plan: Plan, at: string, touch: (id: string) => void): Json {
   const { ctx } = run;
   const p = plan.payload;
-  checkMembers(p, ["target", "reason", "session", "force", "expected_version"], at, `${at}.`);
+  checkMembers(p, ["target", "reason", "session", "force", "expected_version", "x_fencing_token"], at, `${at}.`);
   const ref = refAt(run, p.target, `${at}.target`, plan.index);
   touch(ref.id);
   const row = requireRowAt(run, ref.id, at);
@@ -363,6 +363,7 @@ function applyClose(run: Run, plan: Plan, at: string, touch: (id: string) => voi
     session: optString(p, "session", `${at}.session`, true) ?? "",
     force: optBool(p, "force", `${at}.force`) ?? false,
     expected,
+    token: optInt(p, "x_fencing_token", `${at}.x_fencing_token`),
   });
   if (!alreadyClosed) run.written.add(ref.id);
   return { kind: "close", issue_id: ref.id, changed: !alreadyClosed, revision: String(loadIssue(ctx.sql, ctx.tracker, ref.id)!.version) };
@@ -433,8 +434,9 @@ function applyComment(run: Run, plan: Plan, actor: string, at: string): Json {
   const p = plan.payload;
   checkMembers(p, ["target", "text"], at, `${at}.`);
   const id = refAt(run, p.target, `${at}.target`, plan.index).id;
-  addComment(ctx, id, { author: actor, text: p.text });
-  return { kind: "x_comment", issue_id: id, changed: true, revision: String(loadIssue(ctx.sql, ctx.tracker, id)!.version) };
+  const out = addComment(ctx, id, { author: actor, text: p.text });
+  const comment = out.body as { id: string };
+  return { kind: "x_comment", issue_id: id, x_comment_id: comment.id, changed: true, revision: String(loadIssue(ctx.sql, ctx.tracker, id)!.version) };
 }
 
 /** `x_set_config` `{key, value}` and `x_unset_config` `{key}`: the settings plane, as `POST /config` and `DELETE /config/{key}`. */

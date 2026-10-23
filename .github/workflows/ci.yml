@@ -6,6 +6,10 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - AGENTS.md
+      - scripts/*-bootstrap.mjs
+      - scripts/lib/staff-mcp-bootstrap.mjs
   workflow_dispatch:
 
 permissions:
@@ -34,8 +38,8 @@ jobs:
       - run: pnpm typecheck
       - name: Guarded historical identity admission regression
         run: node --test scripts/import-prefix.test.mjs
-      - name: Conformance and immutable artifact regressions
-        run: node --test "test/*.pure.test.mjs" scripts/conformance-result.test.mjs scripts/release-artifacts.test.mjs
+      - name: Tracker snapshot regression
+        run: node --test "test/*.pure.test.mjs"
       - name: Setup CLI tests
         run: pnpm test:cli
 

@@ -1,6 +1,8 @@
 // Test harness: real tokens from the provider's own authorization flow, requests through the real Worker.
 import { getOAuthApi, type AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { env, exports } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
+import worker from "../src/index";
 import { providerOptions } from "../src/auth/provider";
 import { SCOPE_READ, SCOPE_WRITE } from "../src/auth/scopes";
 
@@ -19,14 +21,18 @@ let clientReady: Promise<{ clientId: string }> | undefined;
  * the authorization request, the grant is completed for a verified principal (what the Access
  * callback does after sign-in), and the code is redeemed at the real token endpoint.
  */
-export async function tokenFor(email: string, scopes: string[] = BOTH): Promise<string> {
-  const oauth = getOAuthApi(providerOptions(env), env);
-  clientReady ??= oauth.createClient({ redirectUris: [REDIRECT], tokenEndpointAuthMethod: "none", clientName: "test" });
-  const CLIENT_ID = (await clientReady).clientId;
+export async function tokenFor(email: string, scopes: string[] = BOTH, origin = ORIGIN): Promise<string> {
+  // Another origin stands for another deployment (tenant): its own provider, client and token audience.
+  const issuer = origin === ORIGIN ? env : { ...env, PUBLIC_ORIGIN: origin };
+  const oauth = getOAuthApi(providerOptions(issuer), issuer);
+  const client = origin === ORIGIN
+    ? (clientReady ??= oauth.createClient({ redirectUris: [REDIRECT], tokenEndpointAuthMethod: "none", clientName: "test" }))
+    : oauth.createClient({ redirectUris: [REDIRECT], tokenEndpointAuthMethod: "none", clientName: "other tenant" });
+  const CLIENT_ID = (await client).clientId;
 
   const verifier = `${crypto.randomUUID()}${crypto.randomUUID()}`;
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
-  const authorize = new URL("/authorize", ORIGIN);
+  const authorize = new URL("/authorize", origin);
   authorize.search = new URLSearchParams({
     response_type: "code",
     client_id: CLIENT_ID,
@@ -35,7 +41,7 @@ export async function tokenFor(email: string, scopes: string[] = BOTH): Promise<
     state: "state",
     code_challenge: challenge,
     code_challenge_method: "S256",
-    resource: ORIGIN,
+    resource: origin,
   }).toString();
   const request: AuthRequest = await oauth.parseAuthRequest(new Request(authorize));
   const sub = `sub-${email}`;
@@ -48,8 +54,11 @@ export async function tokenFor(email: string, scopes: string[] = BOTH): Promise<
   });
   const code = new URL(redirectTo).searchParams.get("code")!;
 
-  const response = await exports.default.fetch(
-    new Request(new URL("/oauth/token", ORIGIN), {
+  const redeem = (request: Request) => origin === ORIGIN
+    ? exports.default.fetch(request)
+    : worker.fetch(request as Request<unknown, IncomingRequestCfProperties>, issuer as Env, createExecutionContext());
+  const response = await redeem(
+    new Request(new URL("/oauth/token", origin), {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -58,7 +67,7 @@ export async function tokenFor(email: string, scopes: string[] = BOTH): Promise<
         redirect_uri: REDIRECT,
         client_id: CLIENT_ID,
         code_verifier: verifier,
-        resource: ORIGIN,
+        resource: origin,
       }),
     }),
   );

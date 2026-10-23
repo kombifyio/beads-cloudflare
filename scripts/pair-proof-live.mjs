@@ -6,6 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { verifyLiveWorkflows } from './live-workflow-journey.mjs';
 
 const base = process.env.BEADS_CLOUDFLARE_BASE;
 const origin = base ? new URL(base) : null;
@@ -59,6 +60,7 @@ try {
   const context = await request(`/t/${pool[0]}/v0/beads/context`, key.key);
   if (context.x_store_version !== version || context.x_source_sha !== expectedSha) throw new Error('live pair version/source mismatch');
   console.log(`live pair: Worker ${expectedSha}, version ${version}, finite shared-test pool ${prefix}`);
+  await verifyLiveWorkflows({ base, token: key.key, tracker: pool[0], outsideTracker: `${prefix}-outside`, expectedSha });
   const childEnv = { ...process.env, BEADS_CLOUDFLARE_TOKEN: key.key, PAIR_TEST_POOL: JSON.stringify(pool), PAIR_USED_TRACKERS: usedFile };
   for (const name of Object.keys(childEnv)) {
     if (name !== 'BEADS_CLOUDFLARE_TOKEN' && /TOKEN|SECRET|PRIVATE_KEY|PASSWORD/i.test(name)) delete childEnv[name];

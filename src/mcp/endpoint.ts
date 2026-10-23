@@ -7,6 +7,8 @@ import { scopeRefusal, type ApiContext } from "../auth/provider";
 import { effectiveScopes, SCOPE_READ, SCOPE_WRITE } from "../auth/scopes";
 import { agentHeader } from "../tracker/util";
 import { buildServer, WRITE_TOOLS } from "./tools";
+import { GOVERNED_WRITE_TOOLS, registerGoverned } from "./governed";
+import { registerPortfolio } from "./portfolio";
 
 /** Browser transport policy; bearer verification remains the OAuth provider's responsibility. */
 function withCors(response: Response): Response {
@@ -27,7 +29,7 @@ async function writeToolsCalled(request: Request): Promise<boolean> {
     const messages = Array.isArray(body) ? body : [body];
     return messages.some((m) => {
       const msg = m as { method?: unknown; params?: { name?: unknown } };
-      return msg?.method === "tools/call" && typeof msg.params?.name === "string" && WRITE_TOOLS.has(msg.params.name);
+      return msg?.method === "tools/call" && typeof msg.params?.name === "string" && (WRITE_TOOLS.has(msg.params.name) || GOVERNED_WRITE_TOOLS.has(msg.params.name));
     });
   } catch {
     return false;
@@ -63,7 +65,10 @@ export async function handleMcp(request: Request, env: Env, ctx: ApiContext): Pr
     return withCors(Response.json({ jsonrpc: "2.0", error: { code: -32600, message: "X-Beads-Agent is invalid" }, id: null }, { status: 400 }));
   }
   const handler = createMcpHandler(
-    () => buildServer({ store: storeFor(env), principal: { ...ctx.props }, agent, canWrite }),
+    () => {
+      const deps = { store: storeFor(env), principal: { ...ctx.props }, agent, canWrite };
+      return registerPortfolio(registerGoverned(buildServer(deps), deps), deps, env);
+    },
     {
       // SDK-owned modern handling and the WebStandardStreamableHTTPServerTransport
       // legacy leg share one factory and close their instances when responses finish/cancel.

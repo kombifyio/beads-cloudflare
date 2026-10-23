@@ -90,6 +90,9 @@ The server verifies the immutable repository ID, exact admitted main workflow an
 and pull-request jobs do not establish a developer's push authority.
 
 `POST <origin>/auth/github` receives `{repository, tracker}` with the GitHub bearer and returns `{token, expires_at}`.
+Credentials live 12 to 24 hours (twelve-hour issuance windows; every exchange in a window returns the same key), so
+GitHub sees about one verification per host and binding a day. The setup CLI records `renew_at` at half-life: past it,
+it tries a new exchange but keeps the held credential until expiry when GitHub refuses or throttles the renewal.
 The credential's tracker and scopes are set by server policy, never client choices. Credentials never appear in
 errors, and redirects and oversized responses are refused. The backend uses a 10-second identity deadline and
 a 15-second exchange deadline. A missing or malformed expiry forces refresh; cached keys from another repository
@@ -107,7 +110,7 @@ The setup CLI's scoped cache is shaped as follows (values shown are placeholders
   "https://beads.example.com": {
     "github_trusted": true,
     "github": {
-      "owner/repository#project": { "token": "<scoped credential>", "expires_at": "<RFC3339 timestamp>" }
+      "owner/repository#project": { "token": "<scoped credential>", "expires_at": "<RFC3339 timestamp>", "renew_at": "<RFC3339 timestamp>" }
     }
   }
 }
@@ -127,6 +130,13 @@ the `actor` member and as `X-Beads-Agent`; the server records it as
 
 Every write carries an `Idempotency-Key`, minted once per logical operation and
 reused across the client's own retries (network errors and 5xx, with backoff).
+
+The typed `cloudflare.Problem` carries `Outcome` and `MutationApplied` from the
+store's refusal envelope. `RejectedWithoutMutation()` returns true only for an
+explicit rollback acknowledgement, not for an HTTP code alone. Inspect an
+uncertain outcome before starting another logical operation. HTTP context
+`x_identity` reports the credential principal separately from the native actor;
+issue `x_claim` reports claim identity, expiry and fencing.
 
 Leftovers of a former Dolt workspace that matter: a `.beads/dolt` directory with no
 `.beads/.local_version` makes bd refuse ("legacy Dolt workspace"); delete it or
@@ -278,7 +288,7 @@ workspace selects, so the check cannot see this one. A second error,
 `bd prime Command`, appears when no `bd` is on `PATH` (the probe runs `bd prime`
 from `PATH`, not the binary doing the check). Everything else doctor reports is real.
 The proposal to fix the first one upstream is in
-[docs/upstream-proposals.md](docs/upstream-proposals.md).
+[docs/upstream-proposals.md](upstream-proposals.md).
 
 ## Conformance
 
@@ -286,10 +296,10 @@ Beads ships a conformance suite for out-of-tree backends. Measured against a loc
 store (`wrangler dev`) with Beads `v1.3.1`:
 
 - **Unsupported contract: every declared refusal passes.**
-- **Portable raw surface (`RunAll`): 52 pass, 8 fail** of 60 checks (it was 49 / 11
-  before, and 35 / 25 before that).
+- **Portable raw surface (`RunAll`): 52 pass, 8 fail** of 60 checks.
 
-The 8 checks that fail, and why each is not a defect in the translation:
+The 8 checks that fail, and why each is not a defect in the translation (the evidence and
+what would close each one are in [docs/profile.md](profile.md#declared-conformance-deviations-bd-backend)):
 
 - **Four transaction checks** (`TransactionReadYourWrites`,
   `TransactionSnapshotReads`, `TransactionSearchIncludeDependencies`,
@@ -299,7 +309,7 @@ The 8 checks that fail, and why each is not a defect in the translation:
 - **`HeartbeatRenewsLease`.** A caller-supplied lease TTL cannot be honoured: the
   context key that carries it is unexported upstream, so an out-of-tree backend
   cannot read it. The proposal to export a reader is in
-  [docs/upstream-proposals.md](docs/upstream-proposals.md).
+  [docs/upstream-proposals.md](upstream-proposals.md).
 - **`SearchPaging`.** The row cap is enforced, but the typed error the check
   expects (`*issueops.ErrTooManyRows`) lives in an internal package an out-of-tree
   backend cannot construct, so the error is a validation error with the same text.
@@ -314,28 +324,6 @@ The 8 checks that fail, and why each is not a defect in the translation:
   it is refused), and the server's readiness rules where they differ from the
   reference: blocking inherited through a parent chain, dependent counts across
   edge types, an ancestor-cycle error, and one closed-at timestamp comparison.
-
-## Bugs the live suite caught that reading the code did not
-
-Each of these looked correct and was not:
-
-- **`PATCH` needs a nested `patch` object.** The editable fields go inside
-  `{"patch": {...}}` with the guards beside it; sending them flat is refused with
-  `unknown_parameter`. Every update was malformed.
-- **`getIssue` omits comments and dependents unless asked.** They are opt-in
-  query members, and a read that does not ask comes back with `comments_omitted`
-  set, so comment and dependent reads were silently empty.
-- **`omitempty` does not apply to `time.Time`.** With `preserve_timestamps` on
-  and no caller-supplied time, the zero time was still serialised and the store
-  recorded **year one** as the issue's age.
-- **`ready:count` answers `{"total": n}`, not `{"count": n}`.** Every ready count
-  was zero.
-- **The events envelope is `{head, records}` with `seq`/`ts`/`x_event_type`**, not
-  a generic item list, so the event read returned nothing.
-- **Error translation broke `isNotFound`.** Mapping the Worker `Problem` onto
-  Beads sentinels wrapped it, and the type assertion that had been checking for
-  a missing issue stopped matching, so a batch read failed on the one absent id
-  it was supposed to skip.
 
 ## Running the tests
 

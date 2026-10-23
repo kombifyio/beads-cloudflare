@@ -71,6 +71,7 @@ export function exportParams(q: Query): ExportQuery {
     labelAny: q.list("label_any"),
     excludeLabel: q.list("exclude_label"),
     parent: q.str("parent"),
+    externalRef: q.str("external_ref"),
     includeTemplates: q.bool("include_templates"),
     includeGates: q.bool("include_gates"),
     includeInfra: q.bool("include_infra"),

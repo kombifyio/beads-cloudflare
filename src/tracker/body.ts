@@ -43,7 +43,8 @@ export function nameMember(body: Json, name: string): string {
 
 export function boundedText(value: string, param: string): string {
   const chars = runeLength(value);
-  if (chars > MAX_FIELD) throw invalid(param, `\`${param}\` is ${chars} characters; storage holds at most ${MAX_FIELD}`);
+  if (chars > MAX_FIELD) throw invalid(param, `\`${param}\` is ${chars} characters; storage holds at most ${MAX_FIELD}`, "text_too_long")
+    .withExtras({ x_limit: MAX_FIELD, x_actual: chars, x_unit: "characters", x_repair: param.endsWith("reason") ? "use_short_reason_and_evidence_comment" : "shorten_field" });
   if (hasControlChar(value)) throw invalid(param, `\`${param}\` must not contain control characters`);
   return value;
 }

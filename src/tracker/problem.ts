@@ -14,6 +14,19 @@ export interface Out {
   replayed?: boolean;
 }
 
+/** Only called after a refused write transaction rolled back, never for an uncertain transport error. */
+export function rejectedWrite(out: Out): Out {
+  if (out.status < 400 || out.status >= 500) return out;
+  const body = out.body;
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return out;
+  // The original request under this key committed; rollback of the conflicting
+  // request says nothing about that operation's effects.
+  if ("reason" in body && body.reason === "idempotency_key_reused") {
+    return { ...out, body: { ...body, x_outcome: "unknown" } };
+  }
+  return { ...out, body: { ...body, x_outcome: "rejected", x_mutation_applied: false } };
+}
+
 const STATUS: Record<string, number> = {
   invalid_argument: 400,
   invalid_cursor: 400,

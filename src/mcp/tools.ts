@@ -6,6 +6,8 @@ import { forbiddenTracker, type Out } from "../tracker/problem";
 import type { Call, ReadOp, TeamStore, WriteOp } from "../tracker/team-store";
 import { canonicalJson, MAX_TRACKER, sha256Hex, TRACKER_ID, type Json } from "../tracker/util";
 import { STORE_VERSION } from "../version";
+import { inspectIdentity } from "../auth/identity";
+import { agentHeader, hasControlChar } from "../tracker/util";
 
 export interface ToolDeps {
   store: DurableObjectStub<TeamStore>;
@@ -15,21 +17,30 @@ export interface ToolDeps {
   canWrite: boolean;
 }
 
-const tracker = z
+export const tracker = z
   .string()
   .max(MAX_TRACKER)
   .regex(TRACKER_ID, "lower-case letters, digits and single dashes")
   .describe("Tracker id: the Beads project to act on.");
 const id = z.string().min(1).describe("Issue id.");
-const mutationId = z
+export const mutationId = z
   .string()
   .min(1)
   .max(200)
   .optional()
   .describe("Always send a fresh unique value and reuse it unchanged when retrying this exact call; a repeat returns the first result without writing again.");
+export const workerActor = z.string().trim().min(1).max(255)
+  .refine(name => !hasControlChar(name) && new TextEncoder().encode(name).length <= 256, "worker name must have at most 256 UTF-8 bytes and no control characters")
+  .optional().describe("Worker/display name for allocation and provenance only. The authenticated principal still authorizes every operation.");
+
+export function workerCall(call: Call, name?: string): Call {
+  const worker = agentHeader(name ?? call.agent ?? null);
+  if (!worker) return call;
+  return { ...call, agent: worker, ...(call.body && "actor" in call.body ? { body: { ...call.body, actor: worker } } : {}) };
+}
 const labels = z.array(z.string());
 
-const patchShape = z
+export const patchShape = z
   .object({
     title: z.string(),
     description: z.string(),
@@ -62,13 +73,13 @@ const readyFilters = {
   parent: z.string().optional().describe("Only descendants of this issue."),
 };
 
-const SCOPE_ERROR = {
+export const SCOPE_ERROR = {
   isError: true,
   structuredContent: { code: "insufficient_scope", detail: "this tool needs the beads:write scope; re-authorize with it" },
   content: [{ type: "text" as const, text: '{"code":"insufficient_scope","detail":"this tool needs the beads:write scope; re-authorize with it"}' }],
 } satisfies CallToolResult;
 
-function resultOf(out: Out): CallToolResult {
+export function resultOf(out: Out): CallToolResult {
   const failed = out.status >= 400;
   const body = failed ? { ...(out.body as Record<string, unknown>), request_id: crypto.randomUUID() } : (out.body as Record<string, unknown>);
   return { isError: failed, structuredContent: body, content: [{ type: "text", text: JSON.stringify(body) }] };
@@ -79,7 +90,7 @@ export const WRITE_TOOLS = new Set([
   "bead_comment_add", "bead_dependency_add", "bead_dependency_remove", "memory_put", "memory_forget",
 ]);
 
-const dropUndefined = (o: Json): Json => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+export const dropUndefined = (o: Json): Json => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
 export function buildServer(deps: ToolDeps): McpServer {
   const server = new McpServer({ name: "beads-cloudflare", version: STORE_VERSION });
@@ -92,7 +103,7 @@ export function buildServer(deps: ToolDeps): McpServer {
       async (args) => {
         const a = args as z.infer<z.ZodObject<S>> & { tracker: string };
         if (!trackerAllowed(deps.principal, a.tracker)) return resultOf(forbiddenTracker(a.tracker));
-        if (op === "context") return resultOf({ status: 200, body: await deps.store.contextOf(a.tracker) });
+        if (op === "context") return resultOf({ status: 200, body: { ...await deps.store.contextOf(a.tracker), x_identity: inspectIdentity(deps.principal, deps.agent) } });
         return resultOf(await deps.store.read(op, { tracker: a.tracker, principal: deps.principal, agent: deps.agent, ...map(a) }));
       },
     );
@@ -101,15 +112,15 @@ export function buildServer(deps: ToolDeps): McpServer {
   const write = <S extends z.ZodRawShape>(name: string, description: string, shape: S, op: WriteOp, map: (a: z.infer<z.ZodObject<S>>) => Partial<Call>) => {
     server.registerTool(
       name,
-      { description, inputSchema: z.object({ tracker, ...shape, mutation_id: mutationId }), annotations: { readOnlyHint: false, idempotentHint: true } },
+      { description, inputSchema: z.object({ tracker, ...shape, mutation_id: mutationId, worker_actor: workerActor }), annotations: { readOnlyHint: false, idempotentHint: true } },
       async (args) => {
         if (!deps.canWrite) return SCOPE_ERROR;
         if (!trackerAllowed(deps.principal, (args as { tracker: string }).tracker)) return resultOf(forbiddenTracker((args as { tracker: string }).tracker));
-        const { tracker: t, mutation_id, ...rest } = args as z.infer<z.ZodObject<S>> & { tracker: string; mutation_id?: string };
-        const call: Call = { tracker: t, principal: deps.principal, agent: deps.agent, ...map(rest as z.infer<z.ZodObject<S>>) };
+        const { tracker: t, mutation_id, worker_actor, ...rest } = args as z.infer<z.ZodObject<S>> & { tracker: string; mutation_id?: string; worker_actor?: string };
+        const call = workerCall({ tracker: t, principal: deps.principal, agent: deps.agent, ...map(rest as z.infer<z.ZodObject<S>>) }, worker_actor);
         if (mutation_id) {
           // The request hash covers the tool and its arguments but not the mutation id itself.
-          call.idem = { key: `mcp:${mutation_id}`, hash: await sha256Hex(canonicalJson({ tool: name, tracker: t, args: rest })) };
+          call.idem = { key: `mcp:${mutation_id}`, hash: await sha256Hex(canonicalJson({ tool: name, tracker: t, args: rest, worker_actor })) };
         }
         return resultOf(await deps.store.write(op, call));
       },
@@ -183,7 +194,7 @@ export function buildServer(deps: ToolDeps): McpServer {
 
   write("bead_claim", "Claim a bead for yourself with a lease. Returns fencing_token (x_fencing_token); keep it and send it to close or release. Claiming again as the holder renews the lease.", {
     id,
-    lease_seconds: z.number().int().min(1).max(86400).optional().describe("Default 1800."),
+    lease_seconds: z.number().int().min(1).max(86400).optional().describe("Default 7200. A write of yours on the bead renews it."),
   }, "claimIssue", (a) => ({ id: a.id, body: dropUndefined({ actor, x_lease_seconds: a.lease_seconds }) }));
 
   write("bead_claim_next", "Claim the best ready bead, atomically. Returns {} when nothing is claimable; poll again later.", {

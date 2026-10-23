@@ -7,11 +7,30 @@ import { invalid, problemOut, Refusal, refuse } from "../tracker/problem";
 import { isObject, isTrackerId } from "../tracker/util";
 
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/;
-const WINDOW_MS = 59 * 60_000;
+// Twelve-hour issuance windows keep GitHub off the hot path: one verification per
+// host and binding per window, and a client renewing at half-life outlasts a spent
+// REST budget (it resets hourly) on the credential it already holds.
+const WINDOW_MS = 12 * 3600_000;
+const READER_WINDOW_MS = 59 * 60_000;
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
 interface OidcPolicy { repository_id: string; workflow_refs: string[] }
 interface AppReadPolicy { app_id: string; installation_id: string; repositories: string[] }
-interface RepositoryPolicy { trackers: string[]; import?: boolean; oidc?: OidcPolicy }
+/** `portfolio_readers`: main-branch workflows of this repository that may read every mapped tracker, never write. */
+interface RepositoryPolicy { trackers: string[]; import?: boolean; oidc?: OidcPolicy; portfolio_readers?: string[] }
+
+/** Exact main-branch workflow refs of one repository; throws on anything else. */
+function mainWorkflowRefs(repository: string, list: unknown): string[] {
+  if (!Array.isArray(list) || list.length === 0 || list.length > 100) throw new Error();
+  // Relative refs and bare main-branch file names save binding space in larger fleets
+  // (Cloudflare caps text bindings at 5120 bytes), but still authorize one exact repo/file/ref.
+  const refs: unknown[] = list.map((ref) => typeof ref !== "string" ? ref
+    : /^[A-Za-z0-9_.-]+\.ya?ml$/.test(ref) ? `${repository}/.github/workflows/${ref}@refs/heads/main`
+    : ref.startsWith(".github/workflows/") ? `${repository}/${ref}` : ref);
+  if (refs.some((ref) => typeof ref !== "string" ||
+      !ref.startsWith(`${repository}/.github/workflows/`) || !ref.endsWith("@refs/heads/main") ||
+      !/^[A-Za-z0-9_.-]+\.ya?ml$/.test(ref.slice(`${repository}/.github/workflows/`.length, -"@refs/heads/main".length)))) throw new Error();
+  return refs as string[];
+}
 
 function policies(raw: string): Record<string, RepositoryPolicy> {
   try {
@@ -20,27 +39,38 @@ function policies(raw: string): Record<string, RepositoryPolicy> {
     if (!isObject(parsed) || Object.keys(parsed).length > 1000) throw new Error();
     for (const [repository, policy] of Object.entries(parsed)) {
       if (!REPOSITORY.test(repository) || !isObject(policy) ||
-        Object.keys(policy).some((key) => key !== "trackers" && key !== "import" && key !== "oidc") ||
+        Object.keys(policy).some((key) => !["trackers", "import", "oidc", "portfolio_readers"].includes(key)) ||
         !Array.isArray(policy.trackers) || policy.trackers.length === 0 || policy.trackers.length > 100 ||
         policy.trackers.some((tracker) => !isTrackerId(tracker)) ||
         (policy.import !== undefined && typeof policy.import !== "boolean")) throw new Error();
       if (policy.oidc !== undefined) {
         const oidc = policy.oidc;
         if (!isObject(oidc) || Object.keys(oidc).some((key) => key !== "repository_id" && key !== "workflow_refs") ||
-          typeof oidc.repository_id !== "string" || !/^[1-9][0-9]{0,19}$/.test(oidc.repository_id) ||
-          !Array.isArray(oidc.workflow_refs) || oidc.workflow_refs.length === 0 || oidc.workflow_refs.length > 100) throw new Error();
-        // Relative refs save binding space in larger fleets, but still authorize one exact repo/file/ref.
-        const refs = oidc.workflow_refs.map((ref) => typeof ref === "string" && ref.startsWith(".github/workflows/") ? `${repository}/${ref}` : ref);
-        if (refs.some((ref) => typeof ref !== "string" ||
-            !ref.startsWith(`${repository}/.github/workflows/`) || !ref.endsWith("@refs/heads/main") ||
-            !/^[A-Za-z0-9_.-]+\.ya?ml$/.test(ref.slice(`${repository}/.github/workflows/`.length, -"@refs/heads/main".length)))) throw new Error();
-        oidc.workflow_refs = refs;
+          typeof oidc.repository_id !== "string" || !/^[1-9][0-9]{0,19}$/.test(oidc.repository_id)) throw new Error();
+        oidc.workflow_refs = mainWorkflowRefs(repository, oidc.workflow_refs);
+      }
+      // A portfolio reader is bound to this repository's immutable ID, so it needs the oidc entry.
+      if (policy.portfolio_readers !== undefined) {
+        if (policy.oidc === undefined) throw new Error();
+        policy.portfolio_readers = mainWorkflowRefs(repository, policy.portfolio_readers);
       }
     }
     return parsed as unknown as Record<string, RepositoryPolicy>;
   } catch {
     throw refuse("internal", "GitHub repository authorization is not configured correctly.");
   }
+}
+
+/**
+ * Trackers a signed-in human (an OAuth grant) may use: every tracker the repository policy maps, so
+ * MCP and API sign-in reach exactly the stores the credential exchange can issue for. An empty policy
+ * leaves sign-in unrestricted (single-team installations); a malformed one denies every tracker.
+ */
+export function signedInTrackers(env: Env): string[] | undefined {
+  let mapped: Record<string, RepositoryPolicy>;
+  try { mapped = policies(env.GITHUB_REPOSITORIES || "{}"); } catch { return []; }
+  const trackers = [...new Set(Object.values(mapped).flatMap((policy) => policy.trackers))];
+  return trackers.length > 0 ? trackers : undefined;
 }
 
 /** A separate reader grant intersects the existing repository/tracker mapping. */
@@ -115,9 +145,14 @@ async function oidcIdentity(token: string, repository: string, policy: OidcPolic
   }
 }
 
-/** Avoid credentials that expire before a client's next request, while keeping the lifetime <= one hour. */
+/** Lifetime is one to two windows (12-24 h): every exchange in a window reuses one key,
+ * and a renewal at half-life always lands in a later window and receives a new key. */
 export const githubCredentialExpiry = (now: number): string =>
-  new Date((Math.floor(now / WINDOW_MS) + 1) * WINDOW_MS + 60_000).toISOString();
+  new Date((Math.floor(now / WINDOW_MS) + 2) * WINDOW_MS + 60_000).toISOString();
+
+/** App readers verify against the App's own REST budget, and their clients accept at most one hour; portfolio readers share the window. */
+export const appReaderCredentialExpiry = (now: number): string =>
+  new Date((Math.floor(now / READER_WINDOW_MS) + 1) * READER_WINDOW_MS + 60_000).toISOString();
 
 /** Bound buffering before parsing, including bodies whose Content-Length is absent or false. */
 async function boundedJson(body: Request | Response, limit: number): Promise<unknown> {
@@ -160,8 +195,10 @@ export async function exchangeGithub(request: Request, env: Env): Promise<Respon
     let body: unknown;
     try { body = await boundedJson(request, 4096); }
     catch { throw invalid(undefined, "Send a JSON object containing repository and tracker, at most 4096 bytes."); }
-    if (!isObject(body) || Object.keys(body).some((key) => !["repository", "tracker", "credential_type"].includes(key)) ||
-      (body.credential_type !== undefined && body.credential_type !== "github-app") ||
+    if (!isObject(body) || Object.keys(body).some((key) => !["repository", "tracker", "credential_type", "reader"].includes(key)) ||
+      (body.credential_type !== undefined && body.credential_type !== "github-app" && body.credential_type !== "github-portfolio-reader") ||
+      ((body.credential_type === "github-portfolio-reader") !== (body.reader !== undefined)) ||
+      (body.reader !== undefined && (typeof body.reader !== "string" || !REPOSITORY.test(body.reader))) ||
       typeof body.repository !== "string" || !REPOSITORY.test(body.repository) || !isTrackerId(body.tracker)) {
       throw invalid(undefined, "Send a GitHub owner/repository and a valid tracker.");
     }
@@ -175,7 +212,18 @@ export async function exchangeGithub(request: Request, env: Env): Promise<Respon
     const token = match[1]!;
     let subject: string;
     const appRead = body.credential_type === "github-app";
-    if (appRead) {
+    const portfolioRead = body.credential_type === "github-portfolio-reader";
+    if (portfolioRead) {
+      // The reader's own immutable repository ID and exact reader workflows authenticate it; the
+      // requested repository/tracker mapping above still bounds what it reads, and it never writes.
+      const reader = body.reader as string;
+      const grant = Object.hasOwn(policy, reader) ? policy[reader] : undefined;
+      if (!grant?.oidc || !grant.portfolio_readers || token.split(".").length !== 3) {
+        throw refuse("forbidden", "A configured portfolio reader workflow and its GitHub Actions identity are required.");
+      }
+      const identity = await oidcIdentity(token, reader, { repository_id: grant.oidc.repository_id, workflow_refs: grant.portfolio_readers }, env.PUBLIC_ORIGIN);
+      subject = identity.replace("github-exchange:oidc:", "github-exchange:oidc-reader:");
+    } else if (appRead) {
       const reader = appReadPolicy(env.GITHUB_READ_APP ?? "");
       if (!reader?.repositories.includes(repository) || token.split(".").length !== 3) {
         throw refuse("forbidden", "A configured GitHub App reader and its App JWT are required.");
@@ -208,8 +256,9 @@ export async function exchangeGithub(request: Request, env: Env): Promise<Respon
       }
       subject = `github-exchange:${user.id}`;
     }
-    const scopes = appRead ? [SCOPE_READ] : [SCOPE_READ, SCOPE_WRITE, ...(configured.import === true ? [SCOPE_IMPORT] : [])];
-    const expiresAt = githubCredentialExpiry(Date.now());
+    const readOnly = appRead || portfolioRead;
+    const scopes = readOnly ? [SCOPE_READ] : [SCOPE_READ, SCOPE_WRITE, ...(configured.import === true ? [SCOPE_IMPORT] : [])];
+    const expiresAt = readOnly ? appReaderCredentialExpiry(Date.now()) : githubCredentialExpiry(Date.now());
     const key = await reusableKey(env.COOKIE_ENCRYPTION_KEY,
       JSON.stringify(["github-exchange-v1", env.TEAM, repository, tracker, subject, scopes, expiresAt]));
     const issued = await storeFor(env).createExchangeKey(key, {

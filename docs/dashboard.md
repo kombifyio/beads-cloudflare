@@ -1,86 +1,28 @@
 # Portfolio dashboard
 
-Open `/dashboard/` on the store's public origin. The same Worker serves the page,
-the read-only portfolio API and the existing tracker API; it needs no separate
-Pages deployment or second tracker database.
+Open `/dashboard/` on the store's public origin. The same Worker serves the page, the read-only portfolio API and the tracker API (no separate Pages deployment or second tracker database).
 
-Sign-in uses the configured Cloudflare Access OIDC provider. A confidential
-OAuth client requests only `beads:read`; PKCE and a browser-bound state cookie
-protect the return. OAuth tokens remain in server-side KV. Browsers receive an
-opaque HttpOnly, Secure, SameSite cookie lasting at most one hour. Sign-out is a
-same-origin POST. Every API call reuses the existing provider's scope and tracker
-authorization. API keys can read `/portfolio/overview` directly with their
-existing scopes and tracker restrictions; an administrator token is not a
-portfolio credential. The public HTML contains no tracker data.
+Sign-in uses the configured Cloudflare Access OIDC provider: a confidential OAuth client requests only `beads:read`, PKCE and a browser-bound state cookie protect the return, and OAuth tokens stay in server-side KV. Browsers get an opaque HttpOnly, Secure, SameSite cookie lasting at most one hour; sign-out is a same-origin POST. Every API call reuses the provider's scope and tracker authorization. API keys can read `/portfolio/overview` directly within their scopes and tracker restrictions; an administrator token is not a portfolio credential. The public HTML contains no tracker data.
 
 ## Configuration
 
-`PORTFOLIO_TITLE` labels the signed-in overview. `PORTFOLIO_REPOSITORIES` is a JSON
-array of `{id, name, tracker, group}` records. IDs and trackers use the native
-tracker ID grammar. Empty configuration derives the catalog from the existing
-`GITHUB_REPOSITORIES` mapping. Multiple names pointing at one tracker become
-visible aliases and are counted once. Metadata never grants access. For public
-setup use `BEADS_PORTFOLIO_TITLE` and `BEADS_PORTFOLIO_REPOSITORIES` with the
-existing `cloudflare.config.ts` deployment. A deployment with no catalog reports
-an empty overview, rather than discovering unauthorized trackers.
+`PORTFOLIO_TITLE` labels the overview. `PORTFOLIO_REPOSITORIES` is a JSON array of `{id, name, tracker, group}` (IDs and trackers use the tracker ID grammar); empty derives the catalog from `GITHUB_REPOSITORIES`. Several names for one tracker become aliases counted once. Metadata never grants access, and a deployment with no catalog reports an empty overview instead of discovering unauthorized trackers. `PORTFOLIO_LABELS` optionally names catalog groups and roadmap phases as `{"groups": {...}, "phases": {...}}`, each key mapping to a name or to names per language (`{"de": "…", "en": "…"}`); keys without a name show as written, and malformed labels fail the overview instead of being ignored. The UI carries no deployment-specific names. Public setup uses `BEADS_PORTFOLIO_TITLE`, `BEADS_PORTFOLIO_REPOSITORIES` and `BEADS_PORTFOLIO_LABELS` with `cloudflare.config.ts`.
 
-## Areas, modules and scopes
+## Views
 
-Areas group repositories by their catalog `group` and roll up their current
-counts; selecting one filters the repository and scope views. `/portfolio/scopes`
-returns label and issue-type counts (all and closed) per authorized repository;
-labels overlap, so a task carrying two labels counts in both. A repository that
-cannot be read is listed as unavailable, never estimated.
+- **Areas and scopes.** Areas group repositories by catalog `group` and roll up counts; selecting one filters the repository and scope views. `/portfolio/scopes` returns label and issue-type counts (all and closed) per authorized repository; labels overlap, so a task with two labels counts in both. An unreadable repository is listed as unavailable, never estimated.
+- **Modules.** `/portfolio/repositories/{id}/modules` treats epics as modules: each non-epic issue counts toward every epic above it in its parent chain; work without an epic ancestor is unfiled. It reads the authorized brief listing (at most 40 pages of 500, `truncated` beyond) and caches the per-tracker projection in KV for five minutes (`?fresh=true` bypasses).
+- **Repository table.** Click a column heading to sort, again to reverse; counts and progress sort numerically, updates chronologically, unavailable values last. Search, area and task-status filters sit above the table; the status dropdown is multi-select with Select all / Deselect all: a subset shows repositories with at least one task in any selected status, all statuses means unrestricted (including empty or unavailable repositories), none shows nothing; opening the menu never changes the selection. Reset restores search, area and status defaults and keeps the sort. Selection survives refreshes and language changes.
+- **Roadmaps.** The Roadmap section renders a repository's `ROADMAP.md` live from GitHub for repositories in the catalog, mapped to a tracker in `GITHUB_REPOSITORIES` and readable by the GitHub App in `GITHUB_READ_APP`. The Worker signs a short-lived installation token (`contents: read`, memory only) with the App key from the `GITHUB_READ_APP_KEY` secret (Secrets Store binding or plain secret); without it the API answers `503 roadmap_source_unconfigured`. Each `## vX.Y.Z` (or `###`) section is a milestone card; task-list items form its checklist, grouped by bold labels or sub-headings; `(pulled forward from vX.Y.Z)`, `(deferred to vX.Y.Z)` or a `Deferred:` prefix carry a marker, and a completed item after the current milestone is marked as worked ahead (current = the `## Current Focus` target, else the first unfinished). Beads join by the section's named epic (``Beads epic: `id` ``), else a `milestone` epic of the same version; a card counts the epic's descendants plus beads labelled `blocks:v<version>` and lists the open ones, blocking bugs first. Unnamed milestone epics are shown separately. The text view renders the whole file; only `http(s)` links are followed. Responses cache for five minutes (Refresh bypasses). `/portfolio/roadmaps` lists sources, `/portfolio/roadmaps/{id}` returns one parsed roadmap.
 
-`/portfolio/repositories/{id}/modules` treats epics as modules. Every non-epic
-issue counts toward each epic above it in its parent chain; work with no epic
-ancestor is reported as unfiled. It reads the authorized brief native listing
-(at most 40 pages of 500, marked `truncated` beyond that) and caches the
-per-tracker projection in KV for five minutes; `?fresh=true` bypasses the cache.
-
-## Repository columns
-
-Click any repository column heading to sort it; click again to reverse the
-order. Counts and progress sort numerically, and updated timestamps sort
-chronologically. Unavailable values stay last in both directions.
-
-Combine repository/alias search and area selection with inclusive minimum and
-maximum values under each numeric column, or a local calendar date range under
-Updated. Empty bounds are unrestricted. Reset filters clears every repository
-filter while preserving the selected sort. Filters and sorting survive data
-refreshes and language changes in the current page.
+- **State.** With `STATE_PAGE` set to `{ "repository": "owner/name", "path": "<dir>/state-page.json", "tracker": "<tracker-id>" }`, `/portfolio/state` reads that generated JSON page from the repository's default branch through the `GITHUB_READ_APP` reader and the State view becomes the first tab and the default view. It shows headline numbers with trend, measures with baseline and target, products with stable, live and preview versions, journeys, per-store work counts (live tracker counts when the page reports them unavailable) and the page's collectors. Only viewers who may read the configured tracker receive the page; everyone else, and every deployment without `STATE_PAGE`, gets `404` and no State tab. Only a document whose `kind` is `state-page` or ends in `.state-page`, with `schema_version` 1, is accepted. Responses cache for five minutes in KV (Refresh bypasses).
 
 ## Metrics and history
 
-Counts include all durable issues, including templates and infrastructure,
-and exclude ephemeral/no-history records. Details use the same population.
-Blocked means the issue's explicit blocked status. Ready is the existing native
-ready-work count, whose eligibility rules intentionally differ. Active means
-all non-closed records. Unassigned and P0/P1 count non-closed durable records.
-Closure percentage is closed / total; it is not product readiness.
+Counts cover all durable issues (templates and infrastructure included) and exclude ephemeral/no-history records; details use the same population. Blocked is the explicit blocked status; Ready is the native ready-work count, whose rules intentionally differ; Active is every non-closed record; Unassigned and P0/P1 count non-closed durable records; closure percentage is closed / total, not product readiness.
 
-The hourly trigger at minute 17 observes all configured trackers and retains the
-latest complete observation per UTC day for 400 days in existing KV. An
-incomplete capture fails and cannot overwrite a complete day. Current reads
-mark unavailable repositories and partial totals. No captured past is invented
-from imported issue creation dates. Current measurements and saved observations
-are labeled separately. Scheduled failures appear in Worker observability.
-
-An optional private deployment adapter can provide a labeled Dolt archive.
-Its original dates and repository coverage are retained, authorization still
-filters every repository, and the UI never merges it into Cloudflare history.
-Archived observations may cover fewer repositories than the current catalog.
+An hourly trigger (minute 17) observes all configured trackers and keeps the latest complete observation per UTC day for 400 days in KV; an incomplete capture fails and cannot overwrite a complete day. Current reads mark unavailable repositories and partial totals; no past is invented from imported creation dates, and current measurements and saved observations are labeled separately. Scheduled failures show in Worker observability. An optional private deployment adapter can provide a labeled Dolt archive: original dates and coverage are kept, authorization still filters every repository, and the UI never merges it into Cloudflare history.
 
 ## Development and delivery
 
-Execute `collectPortfolio` with authenticated read-only requests against the
-existing live tracker. Render the exported page/client against those observations
-through a loopback development server. Do not copy or emulate the database.
-The focused session regression rejects unsafe requests before any storage
-access. Run `pnpm exec vitest run test/dashboard-session.test.ts`, typecheck,
-deployment-config validation and the public export gate for this slice.
-
-Deploy through the existing store's governed delivery path, preserving its
-Worker name, Durable Object identity and migration history. Verify the protected
-overview, shared-identity login, logout and a regular scheduled capture after
-activation. A source build does not prove those production boundaries.
+Execute `collectPortfolio` with authenticated read-only requests against the live tracker and render the exported page/client through a loopback development server; do not copy or emulate the database. The session regression rejects unsafe requests before any storage access: `pnpm exec vitest run test/dashboard-session.test.ts`, then typecheck, deployment-config validation and the public export gate. Deploy through the store's governed delivery path, preserving Worker name, Durable Object identity and migration history, and verify the protected overview, shared-identity login, logout and a scheduled capture after activation; a source build does not prove those production boundaries.

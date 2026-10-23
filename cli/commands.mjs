@@ -839,7 +839,7 @@ async function portableGithubCredential({ base, repository, tracker, trustStore 
   if (trustStore) credentials[origin] = { ...credentials[origin], github_trusted: true };
   const entry = await resolveGithubCredential({ base, repository, tracker, credentials });
   await updateCredentialFile(credentialsPath(), (document) => {
-    document[origin] = { ...document[origin], ...(trustStore ? { github_trusted: true } : {}), github: { ...document[origin]?.github, [githubCredentialKey(repository, tracker)]: { token: entry.token, expires_at: entry.expires_at } } };
+    document[origin] = { ...document[origin], ...(trustStore ? { github_trusted: true } : {}), github: { ...document[origin]?.github, [githubCredentialKey(repository, tracker)]: { token: entry.token, expires_at: entry.expires_at, ...(entry.renew_at ? { renew_at: entry.renew_at } : {}) } } };
     return document;
   });
   return entry;

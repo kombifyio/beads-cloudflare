@@ -17,7 +17,7 @@ import {
   wrongType,
 } from "./body";
 import { insertEdge, recordEdgeAdded, recordEdgeRemoved, checkEdgeType, type EdgeInput } from "./edges";
-import { claimHolder, guardClaim, leaseExpired, staleClaim } from "./claims";
+import { DEFAULT_LEASE_SECONDS, guardClaim, isHolder, leaseExpired, liveClaim, renewedLease, staleClaim, workerOf } from "./claims";
 import { parseExtra, X_EXTRA } from "./extra";
 import { recordEvent, type Ctx } from "./events";
 import {
@@ -420,12 +420,37 @@ export function updateIssue(ctx: Ctx, id: string, body: Json, guards: UpdateGuar
   if (expectedStatus !== undefined && expectedStatus !== row.status) throw guardFailed("expected_status", expectedStatus);
   if (expectedAssignee !== undefined && expectedAssignee !== row.assignee) throw guardFailed("expected_assignee", expectedAssignee);
 
-  // Status and assignee changes act on a claim: they go through the claim guard.
-  const claimSensitive =
-    (typeof patch.status === "string" && patch.status !== row.status) || (typeof patch.assignee === "string" && patch.assignee !== row.assignee);
+  // Moving an issue to in_progress IS a claim (assignee, lease, fencing), and giving its assignee up on an
+  // in-progress issue is a release. Status and assignee changes go through the claim guard first.
+  const statusIn = optString(patch, "status", "patch.status", true);
+  const assigneeIn = optString(patch, "assignee", "patch.assignee", true);
+  if (statusIn !== undefined) {
+    const vocab = loadVocab(sql, tracker);
+    if (!isStatus(vocab, statusIn)) throw invalid("patch.status", `invalid status: ${statusIn} (valid: ${statusNames(vocab).join(", ")})`);
+  }
+  const ownsLive = liveClaim(row, ctx.now) && isHolder(ctx, row);
+  const releasing = row.status === "in_progress" && row.assignee !== "" && statusIn === undefined && assigneeIn === "";
+  const toStatus = releasing ? "open" : (statusIn ?? row.status);
+  const assigneeMoves = assigneeIn !== undefined && assigneeIn !== row.assignee;
+  const claiming =
+    toStatus === "in_progress" &&
+    (row.status !== "in_progress" || statusIn === "in_progress" || assigneeMoves) &&
+    !(ownsLive && !assigneeMoves);
+  if (claiming && assigneeIn === "") {
+    throw invalid("patch.assignee", "`in_progress` is a claim and needs a holder; an empty `assignee` releases the claim instead, so send one or the other");
+  }
+  const claimant = assigneeIn !== undefined && assigneeIn !== "" ? assigneeIn : workerOf(ctx);
+  const claimSensitive = claiming || releasing || (statusIn !== undefined && statusIn !== row.status) || assigneeMoves;
   let bump = 0;
-  if (claimSensitive) bump = guardClaim(ctx, row, { token, force: forceTransfer });
+  if (claimSensitive) bump = guardClaim(ctx, row, { token, force: forceTransfer }, claiming ? "claim" : "change");
   else if (token !== undefined && token !== row.fencing) throw staleClaim(token, row.fencing);
+  // Work allocated to another name (an open, blocked or deferred issue with an assignee) is not taken by starting it.
+  if (
+    claiming && !ownsLive && row.assignee !== "" && row.assignee !== claimant && !leaseExpired(row, ctx.now) &&
+    row.status !== "in_progress" && row.status !== "closed" && expectedAssignee === undefined && !forceTransfer
+  ) {
+    throw refuse("already_claimed", `issue is assigned to "${row.assignee}"; send \`force_assignee_transfer\` to take it over, or have the assignee release it`, { assignee: row.assignee, issue_status: row.status });
+  }
 
   // Column changes, validated member by member.
   const next: Record<string, SqlStorageValue> = {};
@@ -476,46 +501,51 @@ export function updateIssue(ctx: Ctx, id: string, body: Json, guards: UpdateGuar
     if (canonicalJson(merged) !== canonicalJson(current)) next.extra = canonicalJson(merged);
     if (edit.pinned !== undefined) set("pinned", edit.pinned ? 1 : 0);
   }
+  const clearClaim = () => {
+    next.lease_expires_at = null;
+    next.heartbeat_at = null;
+    next.claimed_by = "";
+  };
   if (patch.assignee !== undefined) {
     const assignee = optString(patch, "assignee", "patch.assignee", true) ?? "";
-    if (assignee !== row.assignee) {
-      // Upstream lets the owner move its own assignment (AuthorizeAssigneeTransferWithPools: the holder matches the
-      // actor). Here the holder is the verified principal of the claim, and the assignee is a name the caller chose,
-      // so the owner is the principal that took the claim, or the one whose own name the assignee is. A lapsed lease
-      // is no claim any more (the claim rule), so the fence covers live and lease-less assignments only.
-      const owner = claimHolder(row) === ctx.actor || row.assignee === ctx.actor;
-      if (row.status === "in_progress" && row.assignee !== "" && !owner && !leaseExpired(row, ctx.now) && expectedAssignee === undefined && !forceTransfer) {
-        throw refuse("already_claimed", "`patch.assignee` transfers work away from a live foreign owner; send `force_assignee_transfer`, or guard with `expected_assignee`", { param: "patch.assignee" });
-      }
+    // A claim sets its holder below and a release empties it; this is the plain assignment of work to a name.
+    if (assignee !== row.assignee && !claiming && !releasing) {
       next.assignee = assignee;
-      next.lease_expires_at = null;
+      clearClaim();
     }
   }
 
   let kind = "updated";
-  if (patch.status !== undefined) {
-    const status = optString(patch, "status", "patch.status", true)!;
-    const vocab = loadVocab(sql, tracker);
-    if (!isStatus(vocab, status)) throw invalid("patch.status", `invalid status: ${status} (valid: ${statusNames(vocab).join(", ")})`);
-    if (status !== row.status) {
-      if (status === "closed") {
-        if (!forceClose) enforceClosePolicy(ctx, id, "patch.status", "`patch.status`");
-        next.closed_at = ctx.now;
-        next.lease_expires_at = null;
-        kind = "closed";
-      } else {
-        if (row.status === "closed") {
-          next.closed_at = null;
-          next.close_reason = "";
-          next.closed_by_session = "";
-          kind = "reopened";
-        } else kind = "status_changed";
-        if (status === "in_progress" && !row.started_at) next.started_at = ctx.now;
-        if (row.status === "in_progress") next.lease_expires_at = null;
-      }
-      next.status = status;
+  if (toStatus !== row.status) {
+    if (toStatus === "closed") {
+      if (!forceClose) enforceClosePolicy(ctx, id, "patch.status", "`patch.status`");
+      next.closed_at = ctx.now;
+      clearClaim();
+      kind = "closed";
+    } else {
+      if (row.status === "closed") {
+        next.closed_at = null;
+        next.close_reason = "";
+        next.closed_by_session = "";
+        kind = "reopened";
+      } else kind = "status_changed";
+      if (toStatus === "in_progress" && !row.started_at) next.started_at = ctx.now;
+      if (row.status === "in_progress") clearClaim();
+      // Leaving in progress for open gives the work back: nobody holds it any more (`started_at` stays, as upstream stamps it once).
+      if (toStatus === "open" && row.status === "in_progress") next.assignee = "";
     }
+    next.status = toStatus;
   }
+  if (claiming) {
+    next.assignee = claimant;
+    next.claimed_by = ctx.actor;
+    next.lease_expires_at = new Date(Date.parse(ctx.now) + DEFAULT_LEASE_SECONDS * 1000).toISOString();
+    next.heartbeat_at = ctx.now;
+    next.fencing = row.fencing + Math.max(bump, 1);
+    if (!row.started_at) next.started_at = ctx.now;
+    next.status = "in_progress";
+    if (kind !== "reopened") kind = "claimed";
+  } else if (releasing) kind = "unclaimed";
 
   // Labels: replace, then add, then remove (removal wins).
   const current = new Set(labelsOf(sql, tracker, id));
@@ -541,7 +571,10 @@ export function updateIssue(ctx: Ctx, id: string, body: Json, guards: UpdateGuar
     }
   }
 
-  const changed = Object.keys(next).length > 0 || added.length > 0 || removed.length > 0 || parentChange !== undefined;
+  const content = Object.keys(next).length > 0 || added.length > 0 || removed.length > 0 || parentChange !== undefined;
+  // The live holder's own write is proof of life: it keeps the lease running without anyone renewing it by hand.
+  if ((content || statusIn === "in_progress") && ownsLive && !claiming && !releasing && next.status === undefined) Object.assign(next, renewedLease(ctx, row));
+  const changed = content || Object.keys(next).length > 0;
   if (!changed) {
     return { status: 200, body: { issue: hydratedIssue(sql, tracker, id), changed: false, revision: String(row.version) }, etag: etagOf(row.version) };
   }
@@ -647,6 +680,7 @@ export function getIssue(sql: SqlStorage, tracker: string, id: string, o: GetOpt
 // list
 
 export interface ListQuery {
+  externalRef?: string;
   status?: string[];
   type?: string;
   assignee?: string;
@@ -727,6 +761,8 @@ export function listConditions(sql: SqlStorage, tracker: string, q: ListQuery): 
   const p = new Params(sql, tracker);
   const where = ["i.tracker = ?1"];
 
+  if (q.externalRef !== undefined) where.push(`i.external_ref = ${p.add(q.externalRef)}`);
+
   let statuses = q.status ?? [];
   if (statuses.includes("all")) {
     if (statuses.length > 1) throw invalid("status", 'status "all" cannot be combined with other statuses');
@@ -805,7 +841,12 @@ export function addComment(ctx: Ctx, id: string, body: Json): Out {
   if (textValue === undefined) throw invalid("text", "`text` is required");
   if (typeof textValue !== "string") throw invalid("text", "`text` must be a string");
   if (textValue.trim() === "") throw invalid("text", "validation failed: comment text cannot be empty");
-  if (!idIsAddressable(id) || !loadIssue(ctx.sql, ctx.tracker, id)) throw issueNotFound();
+  const target = idIsAddressable(id) ? loadIssue(ctx.sql, ctx.tracker, id) : undefined;
+  if (!target) throw issueNotFound();
+  const renewed = renewedLease(ctx, target);
+  if (renewed) {
+    ctx.sql.exec("UPDATE issues SET lease_expires_at = ?3, heartbeat_at = ?4 WHERE tracker = ?1 AND id = ?2", ctx.tracker, id, renewed.lease_expires_at, renewed.heartbeat_at);
+  }
 
   const comment = { id: crypto.randomUUID(), issue_id: id, author: ctx.actor, text: textValue, created_at: ctx.now };
   ctx.sql.exec(

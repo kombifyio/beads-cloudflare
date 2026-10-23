@@ -9,6 +9,9 @@ export const repositoryValid = (value) => typeof value === "string" && /^[A-Za-z
 export const beadsTokenEnvValid = (value) => !value || /^BEADS_CLOUDFLARE_(?:[A-Z0-9_]+_)?TOKEN$/.test(value);
 export const credentialFresh = (entry, now = Date.now()) => Boolean(typeof entry?.token === "string" && /^[!-~]+$/.test(entry.token) && (!entry.expires_at || Date.parse(entry.expires_at) > now + 60_000));
 export const githubCredentialFresh = (entry, now = Date.now()) => typeof entry?.expires_at === "string" && credentialFresh(entry, now);
+// Past renew_at (half its lifetime) an exchange is attempted, but the held credential
+// stays usable until it expires, so a spent GitHub REST budget never blocks the tracker.
+export const githubCredentialCurrent = (entry, now = Date.now()) => githubCredentialFresh(entry, now) && !(typeof entry.renew_at === "string" && Date.parse(entry.renew_at) <= now);
 export const githubCredentialKey = (repository, tracker) => `${repository.toLowerCase()}#${tracker}`;
 
 export function exchangeOrigin(base) {
@@ -128,7 +131,12 @@ export async function resolveGithubCredential({ base, repository, tracker, env =
   const origin = exchangeOrigin(base);
   if (!githubStoreTrusted(origin, { env, credentials })) throw new Error(`GitHub exchange refused: ${origin} is not trusted by this host; set BEADS_CLOUDFLARE_TRUSTED_ORIGINS or run join with --trust-store`);
   const cached = credentials[origin]?.github?.[githubCredentialKey(repository, tracker)];
-  if (githubCredentialFresh(cached, now)) return { ...cached, cached: true };
+  if (githubCredentialCurrent(cached, now)) return { ...cached, cached: true };
+  try { return await exchangeGithubCredential({ origin, repository, tracker, env, fetchImpl, spawnImpl, now }); }
+  catch (error) { if (githubCredentialFresh(cached, now)) return { ...cached, cached: true }; throw error; }
+}
+
+async function exchangeGithubCredential({ origin, repository, tracker, env, fetchImpl, spawnImpl, now }) {
   let identity = env.GH_TOKEN || env.GITHUB_TOKEN;
   if (env.ACTIONS_ID_TOKEN_REQUEST_URL || env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) {
     if (!env.ACTIONS_ID_TOKEN_REQUEST_URL || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) throw new Error("GitHub Actions OIDC is incomplete; grant this job id-token: write");
@@ -153,5 +161,5 @@ export async function resolveGithubCredential({ base, repository, tracker, env =
   let entry;
   try { entry = await boundedJson(response); } catch { throw new Error("GitHub exchange returned an invalid response"); }
   if (typeof entry.token !== "string" || !/^[!-~]+$/.test(entry.token) || !githubCredentialFresh(entry, now)) throw new Error("GitHub exchange returned an invalid or expired credential");
-  return { token: entry.token, expires_at: entry.expires_at };
+  return { token: entry.token, expires_at: entry.expires_at, renew_at: new Date(now + (Date.parse(entry.expires_at) - now) / 2).toISOString() };
 }

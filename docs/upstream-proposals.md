@@ -1,6 +1,6 @@
 # Proposals for upstream Beads
 
-Two small changes to [gastownhall/beads](https://github.com/gastownhall/beads) that
+Three small changes to [gastownhall/beads](https://github.com/gastownhall/beads) that
 would let this backend, and any other out-of-tree backend, behave like an in-tree
 one. They are prepared here and **not submitted**; each patch is against the
 `v1.3.1` tag, builds and vets there, and is deliberately the smallest change that
@@ -194,6 +194,47 @@ A second error that `bd doctor` shows, `bd prime Command`
 (`cmd/bd/doctor/claude.go:287-298`), is unrelated: the probe runs `bd prime` from
 `PATH` and fails when no `bd` is installed there.
 
+## 3. Export the row-cap error
+
+**Problem.** A read with `MaxRows` answers `*ErrTooManyRows` when the cap fires
+(`internal/storage/issueops/errors.go:51`), and the conformance suite requires that exact
+type (`backend/conformance/reader_contract.go:888-900`). The type sits in an `internal/`
+package, so an out-of-tree backend can enforce the cap but cannot return an error a caller
+can classify with `errors.As`. This backend fails `SearchPaging` for exactly this reason.
+
+**Change.** A type alias in the public `backend` package, next to `Iter`.
+
+```diff
+diff --git a/backend/backend.go b/backend/backend.go
+index de2f184..6ee5753 100644
+--- a/backend/backend.go
++++ b/backend/backend.go
+@@ -67,6 +67,7 @@ import (
+ 
+ 	"github.com/steveyegge/beads/internal/storage"
+ 	"github.com/steveyegge/beads/internal/storage/backends"
++	"github.com/steveyegge/beads/internal/storage/issueops"
+ )
+ 
+ // DoltStorage is the full engine interface an external backend implements:
+@@ -171,6 +172,11 @@ func WorkspaceIsBeadsDir(name string) bool {
+ 	return backends.WorkspaceIsBeadsDir(name)
+ }
+ 
++// ErrTooManyRows is the error a read answers when its MaxRows cap fires. A
++// backend with a read path of its own returns it so callers can classify the
++// cap with errors.As, as they do for the in-tree engine.
++type ErrTooManyRows = issueops.ErrTooManyRows
++
+ // Iter is the streaming-read cursor returned by the Iter* methods.
+ type Iter[T any] = storage.Iter[T]
+ 
+```
+
+**Why it is safe.** An alias names the same type, so every existing `errors.As` against the
+internal type keeps matching. Built and vetted at `v1.3.1` (`go build ./backend && go vet
+./backend`). Patches 1 and 3 both add the `issueops` import; applied together it appears once.
+
 ## Note to the maintainers
 
 A draft, to be sent when the maintainers of this backend decide to. Not sent.
@@ -213,9 +254,9 @@ A draft, to be sent when the maintainers of this backend decide to. Not sent.
 > Against the v1.3.1 conformance suite it passes the unsupported contract and 52 of
 > 60 checks on the portable surface. Of the eight that fail, two come from what the
 > public package does not expose: the lease TTL context value and the typed error for
-> the row cap. We have written patches in case they are useful, one exporting a reader
-> for the lease TTL and one letting `bd doctor` open the registered backend's store for
-> its version check. They are small and sit in `docs/upstream-proposals.md` in the
+> the row cap. We have written patches in case they are useful: one exporting a reader
+> for the lease TTL, one exporting the row-cap error, and one letting `bd doctor` open the
+> registered backend's store for its version check. They are small and sit in `docs/upstream-proposals.md` in the
 > repository. We have not opened pull requests and will only do so if you want them.
 >
 > We track upstream releases and re-run the suite on every bump. Thank you for

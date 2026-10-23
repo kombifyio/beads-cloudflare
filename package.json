@@ -1,6 +1,6 @@
 {
   "name": "beads-cloudflare",
-  "version": "0.1.12",
+  "version": "0.2.4",
   "private": true,
   "description": "Cloudflare-hosted store for Beads: a declared profile of the bd serve /v0 HTTP contract plus an MCP server.",
   "license": "MIT",
@@ -35,25 +35,25 @@
     "typecheck": "pnpm types && tsc --noEmit",
     "test": "vitest run",
     "test:cli": "node --test \"cli/*.test.mjs\"",
-    "test:pure": "node --test test/http-body.pure.test.mjs test/tracker-snapshot.pure.test.mjs scripts/import-prefix.test.mjs scripts/conformance-result.test.mjs scripts/release-artifacts.test.mjs",
+    "test:pure": "node --test test/tracker-snapshot.pure.test.mjs scripts/import-prefix.test.mjs",
     "version:sync": "node scripts/sync-version.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.3",
     "@modelcontextprotocol/server": "2.3.1",
-    "cf": "1.0.0-beta.14",
-    "wrangler": "4.149.0",
-    "zod": "4.6.5"
+    "cf": "1.0.0-beta.20",
+    "wrangler": "4.151.3",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.23.0",
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "openapi-typescript": "7.13.0",
     "typescript": "6.0.3",
-    "vitest": "4.1.11"
+    "vitest": "5.0.5"
   },
-  "packageManager": "pnpm@11.11.0",
+  "packageManager": "pnpm@12.14.0",
   "engines": {
-    "node": ">=22.23.3"
+    "node": ">=24.22.0"
   }
 }

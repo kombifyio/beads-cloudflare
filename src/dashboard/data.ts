@@ -2,7 +2,8 @@
 export interface Repository { id: string; name: string; tracker: string; group: string; aliases?: string[] }
 export interface Counts { total: number; open: number; in_progress: number; blocked: number; deferred: number; closed: number; active: number; ready: number; unassigned: number; p0p1: number }
 export interface RepositoryReport extends Repository { counts: Counts; completion: number; updatedAt: string; error?: string }
-export interface Snapshot { date: string; generatedAt: string; repositories: RepositoryReport[]; totals: Counts }
+export interface Snapshot { date: string; generatedAt: string; repositories: RepositoryReport[]; totals: Counts; definitions?: typeof countDefinitions }
+export const countDefinitions = {total:'Native durable-plane count, including epics, deferred, closed and pinned; excludes ephemeral and no-history records.',active:'Every durable-plane status except closed and pinned; includes epics and deferred.',ready:'Unchanged native ready membership before issue train actionability policy.',unassigned:'Nonterminal durable-plane issues without an assignee.',p0p1:'Nonterminal durable-plane issues at priority 0 or 1.'};
 export type TrackerRead = (tracker: string, path: string) => Promise<unknown>;
 export const emptyCounts = (): Counts => ({total:0,open:0,in_progress:0,blocked:0,deferred:0,closed:0,active:0,ready:0,unassigned:0,p0p1:0});
 export function totalsOf(repositories: RepositoryReport[]): Counts {
@@ -37,14 +38,14 @@ export async function collectPortfolio(catalog: Repository[], read: TrackerRead,
       const counts = emptyCounts();
       counts.total = statuses.total;
       for (const status of ['open','in_progress','blocked','deferred','closed'] as const) counts[status] = statuses.groups[status] ?? 0;
-      counts.active = counts.total - counts.closed;
+      counts.active = counts.total - counts.closed - (statuses.groups.pinned ?? 0);
       counts.ready = ready.total;
-      counts.unassigned = unassigned.total - (unassigned.groups.closed ?? 0);
-      counts.p0p1 = urgent.total - (urgent.groups.closed ?? 0);
+      counts.unassigned = unassigned.total - (unassigned.groups.closed ?? 0) - (unassigned.groups.pinned ?? 0);
+      counts.p0p1 = urgent.total - (urgent.groups.closed ?? 0) - (urgent.groups.pinned ?? 0);
       return {...repo, counts, completion: counts.total ? Math.round(counts.closed / counts.total * 100) : 0, updatedAt:generatedAt};
     } catch {
       return {...repo, counts:emptyCounts(), completion:0, updatedAt:generatedAt, error:'tracker_unavailable'};
     }
   });
-  return {date:generatedAt.slice(0,10), generatedAt, repositories, totals:totalsOf(repositories)};
+  return {date:generatedAt.slice(0,10), generatedAt, repositories, totals:totalsOf(repositories),definitions:countDefinitions};
 }

@@ -4,24 +4,27 @@
 import { effectiveScopes, SCOPE_WRITE } from "../auth/scopes";
 import type { ApiContext } from "../auth/provider";
 import { readBody, respond, storeFor } from "../http/endpoint";
+import { thresholdsFrom } from "../tracker/health";
 import { parseKeyRequest } from "../tracker/keys";
 import { NO_SUCH_ROUTE, problemOut, Refusal } from "../tracker/problem";
 
 export function isAdmin(env: Env, ctx: ApiContext): boolean {
   if (ctx.props.kind === "admin-token") return true;
+  return isOperatorViewer(env, ctx) && effectiveScopes(ctx.props, ctx.auth.scope).includes(SCOPE_WRITE);
+}
+
+/** A signed-in operator (email in ADMIN_EMAILS), at any scope: may read store health, never manage it. */
+export function isOperatorViewer(env: Env, ctx: ApiContext): boolean {
   if (ctx.props.kind !== undefined) return false;
-  const admins = (env.ADMIN_EMAILS ?? "")
-    .split(",")
-    .map((e) => e.trim().toLowerCase())
-    .filter((e) => e !== "");
-  return admins.includes(ctx.props.email.toLowerCase()) && effectiveScopes(ctx.props, ctx.auth.scope).includes(SCOPE_WRITE);
+  const admins = (env.ADMIN_EMAILS ?? "").split(",").map((e) => e.trim().toLowerCase()).filter((e) => e !== "");
+  return admins.includes(ctx.props.email.toLowerCase());
 }
 
 export async function handleAdmin(request: Request, env: Env, ctx: ApiContext): Promise<Response> {
   const requestId = crypto.randomUUID();
   const path = new URL(request.url).pathname;
   const one = /^\/admin\/keys\/([^/]+)$/.exec(path);
-  const known = path === "/admin/keys" || path === "/admin/trackers" || one;
+  const known = path === "/admin/keys" || path === "/admin/trackers" || path === "/admin/health" || one;
   if (!known) return respond(NO_SUCH_ROUTE, requestId);
   if (!isAdmin(env, ctx)) {
     return respond(problemOut("forbidden", "this needs an administrator"), requestId);
@@ -31,6 +34,10 @@ export async function handleAdmin(request: Request, env: Env, ctx: ApiContext): 
     if (path === "/admin/trackers" && request.method === "GET") {
       // Issue counts per tracker and status: how an operator checks a migration without SQL.
       return respond({ status: 200, body: { items: await store.trackerSummary() } }, requestId);
+    }
+    if (path === "/admin/health" && request.method === "GET") {
+      // Live store health; the hourly cron records the same fields and alerts on thresholds.
+      return respond({ status: 200, body: { ...(await store.healthSample()), thresholds: thresholdsFrom(env) } }, requestId);
     }
     if (path === "/admin/keys" && request.method === "GET") {
       return respond({ status: 200, body: { items: await store.listKeys() } }, requestId);

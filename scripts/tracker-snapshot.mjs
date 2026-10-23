@@ -6,17 +6,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { credentialFilePrivate } from "../cli/github-auth.mjs";
+import { assembleState, archiveSnapshot, canonical, captureSnapshot, cleanIssue, readStateParts, SNAPSHOT_FORMAT as FORMAT, SNAPSHOT_FORMAT_V2 as FORMAT_V2, SNAPSHOT_PART_FORMAT as PART_FORMAT, SNAPSHOT_MAX_BYTES as MAX_BYTES } from "../src/tracker/snapshot-core.mjs";
 
-const FORMAT = "beads-cloudflare.logical-snapshot/v1";
-const MAX_BYTES = 64 << 20;
+export { canonical };
 const BATCH_BYTES = 15 << 20;
-const DERIVED = new Set(["is_blocked", "dependency_count", "dependent_count", "comment_count", "parent", "revision", "comments_omitted", "lease_granted_node", "dependents", "epic_total_children", "epic_closed_children", "epic_closeable"]);
 const trackerValid = value => typeof value === "string" && value.length <= 40 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(value);
-export const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item)
-  ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
 const hash = value => createHash("sha256").update(canonical(value)).digest("hex");
-const cleanIssue = issue => Object.fromEntries(Object.entries(issue).filter(([key]) => !DERIVED.has(key)));
-const orderBy = (items, key) => [...items].sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
 
 export function sealSnapshot(payload) { return { payload, integrity: { algorithm: "sha256", digest: hash(payload) } }; }
 
@@ -51,6 +46,100 @@ export function verifySnapshot(envelope) {
   }
   if (seq !== p.journal.head) throw new Error("snapshot journal is incomplete");
   return p;
+}
+
+/** Part files sit beside a manifest: `day.snapshot.json` → `day/part-00000.json`. */
+export function snapshotPartPath(manifestFile, name) {
+  if (!/^part-\d{5}\.json$/.test(name)) throw new Error("snapshot part name is invalid");
+  const baseName = path.basename(manifestFile);
+  const dirName = baseName.endsWith(".snapshot.json") ? baseName.slice(0, -".snapshot.json".length) : baseName.slice(0, -path.extname(baseName).length);
+  if (!dirName || dirName === "." || dirName === "..") throw new Error("snapshot part path is invalid");
+  const dir = path.resolve(path.dirname(manifestFile), dirName);
+  const resolved = path.resolve(dir, name);
+  const relative = path.relative(dir, resolved);
+  if (relative !== name || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("snapshot part path is invalid");
+  return resolved;
+}
+
+function verifyState(state) {
+  if (typeof state?.project_id !== "string" || !["issues", "dependencies", "memories", "settings"].every(key => Array.isArray(state[key])) ||
+      !Array.isArray(state.vocabulary?.statuses) || !Array.isArray(state.vocabulary?.types)) throw new Error("snapshot format or integrity is invalid");
+  const identities = new Set();
+  for (const issue of state.issues) {
+    if (typeof issue?.id !== "string" || identities.has(issue.id)) throw new Error("snapshot issue identities are invalid");
+    identities.add(issue.id);
+  }
+  for (const edge of state.dependencies) {
+    if (!identities.has(edge.issue_id) || typeof edge.depends_on_id !== "string") throw new Error("snapshot has an edge without a restorable source issue");
+  }
+  for (const key of ["memories", "settings"]) {
+    const keys = new Set();
+    for (const entry of state[key]) {
+      if (typeof entry?.key !== "string" || typeof entry.value !== "string" || keys.has(entry.key)) throw new Error(`snapshot ${key} are invalid`);
+      keys.add(entry.key);
+    }
+  }
+  return state;
+}
+
+/** v1 envelope, or a v2 manifest plus part envelopes from `readPart(name)`. Journal parts are checked and dropped. */
+export function parseSnapshot(envelope, readPart) {
+  if (envelope?.payload?.format === FORMAT_V2) return parseSnapshotV2(envelope, readPart);
+  return { envelope, payload: verifySnapshot(envelope) };
+}
+
+function parseSnapshotV2(envelope, readPart) {
+  const p = envelope?.payload;
+  if (envelope?.integrity?.algorithm !== "sha256" || envelope.integrity.digest !== hash(p) || !trackerValid(p?.source?.tracker) ||
+      typeof p.state?.project_id !== "string" || typeof p.captured_at !== "string" || !Number.isSafeInteger(p.part_bytes) || p.part_bytes < 1 || p.part_bytes > MAX_BYTES ||
+      !Array.isArray(p.parts) || !Array.isArray(p.exclusions) || !Number.isSafeInteger(p.journal?.head) || p.journal.head < 0 || !Number.isSafeInteger(p.journal.records) || p.journal.records < 0) {
+    throw new Error("snapshot format or integrity is invalid");
+  }
+  const stateParts = [];
+  let seq = 0;
+  let journalRecords = 0;
+  let journalStarted = false;
+  for (const [index, spec] of p.parts.entries()) {
+    if (!spec || spec.index !== index || spec.name !== `part-${String(index).padStart(5, "0")}.json` || typeof spec.digest !== "string" || typeof spec.records_digest !== "string" || !Number.isSafeInteger(spec.count) || spec.count < 0) {
+      throw new Error("snapshot format or integrity is invalid");
+    }
+    if (spec.section === "journal") journalStarted = true;
+    else if (journalStarted || !["issues", "dependencies", "memories", "settings", "vocabulary"].includes(spec.section)) throw new Error("snapshot journal is incomplete");
+    const partEnvelope = readPart(spec.name);
+    const part = partEnvelope?.payload;
+    if (partEnvelope?.integrity?.algorithm !== "sha256" || partEnvelope.integrity.digest !== spec.digest || hash(part) !== spec.digest ||
+        part?.format !== PART_FORMAT || part.section !== spec.section || part.index !== index || part.tracker !== p.source.tracker || part.captured_at !== p.captured_at) {
+      throw new Error("snapshot format or integrity is invalid");
+    }
+    const body = part.section === "vocabulary" ? part.vocabulary : part.records;
+    if (part.section === "vocabulary") {
+      if (!Array.isArray(part.vocabulary?.statuses) || !Array.isArray(part.vocabulary?.types)) throw new Error("snapshot format or integrity is invalid");
+    } else if (!Array.isArray(part.records)) throw new Error("snapshot format or integrity is invalid");
+    if (hash(body) !== spec.records_digest) throw new Error("snapshot format or integrity is invalid");
+    if (part.section === "vocabulary") {
+      if (spec.count !== part.vocabulary.statuses.length + part.vocabulary.types.length) throw new Error("snapshot format or integrity is invalid");
+      stateParts.push(part);
+    } else if (part.section === "journal") {
+      if (spec.count !== part.records.length || spec.seq_first !== part.records[0]?.seq || spec.seq_last !== part.records.at(-1)?.seq) throw new Error("snapshot journal order is invalid");
+      for (const event of part.records) {
+        if (!Number.isSafeInteger(event.seq) || event.seq <= seq || event.seq > p.journal.head) throw new Error("snapshot journal order is invalid");
+        seq = event.seq;
+      }
+      journalRecords += part.records.length;
+    } else {
+      if (!Array.isArray(part.records) || spec.count !== part.records.length) throw new Error("snapshot format or integrity is invalid");
+      stateParts.push(part);
+    }
+  }
+  if (seq !== p.journal.head || journalRecords !== p.journal.records) throw new Error("snapshot journal is incomplete");
+  const state = verifyState(assembleState(p.state.project_id, stateParts));
+  return { envelope, payload: { format: p.format, captured_at: p.captured_at, source: p.source, state, journal: { head: p.journal.head, records: [] }, exclusions: p.exclusions, part_bytes: p.part_bytes, parts: p.parts } };
+}
+
+export function readSnapshotFile(file) {
+  const envelope = readPrivate(file);
+  if (envelope?.payload?.format !== FORMAT_V2) return { envelope, payload: verifySnapshot(envelope) };
+  return parseSnapshot(envelope, name => readPrivate(snapshotPartPath(file, name)));
 }
 
 export function assertEmptyDestination(capture, tracker) {
@@ -121,46 +210,8 @@ function client(base, token) {
   };
 }
 
-async function capture(request, tracker) {
-  const before = await request(tracker, "/context");
-  if (!before.capabilities?.includes("profile.logical_recovery_v1") || !Number.isSafeInteger(before.x_mutation_revision)) throw new Error("store does not advertise guarded logical recovery");
-  let consumed = 0;
-  const budget = data => { consumed += Buffer.byteLength(canonical(data)); if (consumed > MAX_BYTES) throw new Error("snapshot exceeds the 64 MiB memory budget"); return data; };
-  const pages = async (suffix, field, event = false) => {
-    const items = []; let cursor; let since = 0;
-    for (;;) {
-      const page = await request(tracker, `${suffix}${event ? `&since=${since}` : cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-      const rows = budget(page[field]);
-      if (!Array.isArray(rows)) throw new Error("invalid tracker export response");
-      items.push(...rows);
-      if (event) {
-        if (!rows.length) { if (since !== page.head) throw new Error("incomplete journal export"); break; }
-        const next = rows.at(-1).seq;
-        if (!Number.isSafeInteger(next) || next <= since) throw new Error("journal cursor did not advance");
-        since = next;
-        if (since === page.head) break;
-      } else {
-        if (!page.has_more) break;
-        if (!page.next_cursor || page.next_cursor === cursor) throw new Error("export cursor did not advance");
-        cursor = page.next_cursor;
-      }
-    }
-    return items;
-  };
-  const issues = await pages("/issues:export?include_templates=true&include_gates=true&include_infra=true&include_ephemeral=true&limit=200", "items");
-  const dependencies = await pages("/dependencies:export?limit=1000", "items");
-  const memories = budget((await request(tracker, "/memories")).items);
-  const settings = await pages("/config:export?limit=100", "items");
-  const statuses = budget((await request(tracker, "/config:statuses:detailed")).statuses);
-  const types = budget((await request(tracker, "/config:types")).types);
-  const records = await pages("/events?limit=10", "records", true);
-  const after = await request(tracker, "/context");
-  if (before.x_mutation_revision !== after.x_mutation_revision || before.project_id !== after.project_id ||
-      before.x_store_version !== after.x_store_version || before.x_source_sha !== after.x_source_sha) throw new Error("tracker changed during snapshot; stop all writers before retrying a read");
-  return { context: after, state: { project_id: after.project_id, issues: orderBy(issues.map(cleanIssue), i => i.id),
-    dependencies: orderBy(dependencies, e => `${e.issue_id}\0${e.depends_on_id}`), memories: orderBy(memories, m => m.key), settings: orderBy(settings, s => s.key),
-    vocabulary: { statuses: orderBy(statuses, s => s.name), types } }, journal: { head: records.at(-1)?.seq ?? 0, records } };
-}
+const capture = (request, tracker) => captureSnapshot(request, tracker, { byteLength: text => Buffer.byteLength(text), journal: "head" });
+const digestText = async text => createHash("sha256").update(text).digest("hex");
 
 export function writePrivateSnapshot(file, data) {
   const absolute = path.resolve(file);
@@ -193,30 +244,30 @@ export async function main(args = process.argv.slice(2)) {
   const tracker = trackerAt >= 0 ? flags[trackerAt + 1] : undefined;
   if (!["backup", "verify", "restore"].includes(command) || !file) throw new Error("usage: tracker-snapshot.mjs backup|verify|restore <private-file> [--tracker <id> --quiesced --exclusive]");
   if (command === "verify") {
-    const envelope = readPrivate(file); const payload = verifySnapshot(envelope);
-    console.log(JSON.stringify({ snapshot: "VERIFIED", digest: envelope.integrity.digest, tracker: payload.source.tracker, captured_at: payload.captured_at }));
+    const { envelope, payload } = readSnapshotFile(file);
+    console.log(JSON.stringify({ snapshot: "VERIFIED", digest: envelope.integrity.digest, tracker: payload.source.tracker, captured_at: payload.captured_at, format: payload.format }));
     return;
   }
   if (!trackerValid(tracker) || !flags.includes("--quiesced")) throw new Error("an explicit tracker and --quiesced maintenance assertion are required");
   const base = process.env.BEADS_CLOUDFLARE_BASE;
   const request = client(base, process.env.BEADS_SNAPSHOT_TOKEN);
   if (command === "backup") {
-    const first = await capture(request, tracker);
-    const second = await capture(request, tracker);
-    if (canonical(first) !== canonical(second)) throw new Error("complete semantic snapshot changed across repeated reads; no archive was written");
-    const payload = { format: FORMAT, captured_at: new Date().toISOString(), source: { origin: new URL(base).origin, tracker,
-      store_version: second.context.x_store_version, source_sha: second.context.x_source_sha ?? null, mutation_revision: second.context.x_mutation_revision },
-      state: second.state, journal: second.journal,
-      exclusions: ["api-keys", "oauth-kv-grants", "worker-secrets", "claim-principals-and-fencing", "idempotency-receipts"] };
-    const envelope = sealSnapshot(payload); verifySnapshot(envelope);
-    const serialized = `${JSON.stringify(envelope)}\n`;
-    if (Buffer.byteLength(serialized) > MAX_BYTES) throw new Error("sealed snapshot exceeds the 64 MiB archive budget");
-    writePrivateSnapshot(file, serialized);
-    console.log(JSON.stringify({ snapshot: "SAVED", tracker, digest: envelope.integrity.digest, source_sha: payload.source.source_sha }));
+    const written = [];
+    const archived = await archiveSnapshot(request, tracker, {
+      origin: new URL(base).origin, byteLength: text => Buffer.byteLength(text), sha256: digestText, eventLimit: 1000,
+      emit: async item => {
+        const target = item.role === "part" ? snapshotPartPath(file, item.name) : file;
+        if (item.role === "part") fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+        writePrivateSnapshot(target, item.body);
+        written.push(target);
+      },
+      abort: async () => { for (const target of written.reverse()) fs.rmSync(target, { force: true }); },
+    });
+    console.log(JSON.stringify({ snapshot: "SAVED", tracker, digest: archived.digest, format: archived.format, parts: archived.parts }));
     return;
   }
   if (!flags.includes("--exclusive")) throw new Error("restore requires --exclusive ownership of a new destination tracker");
-  const envelope = readPrivate(file); const snapshot = verifySnapshot(envelope);
+  const { envelope, payload: snapshot } = readSnapshotFile(file);
   if (snapshot.source.origin === new URL(base).origin && snapshot.source.tracker === tracker) throw new Error("restore never targets the source tracker");
   const batches = restoreBatches(snapshot);
   const destination = await capture(request, tracker);
@@ -231,8 +282,15 @@ export async function main(args = process.argv.slice(2)) {
       if (result.x_mutation_revision !== revision + 1) throw new Error("restore acknowledgement lacks the expected revision");
       revision = result.x_mutation_revision; completed++;
     }
-    const restored = await capture(request, tracker);
-    if (restored.context.x_mutation_revision !== revision || canonical(restored.state) !== canonical(snapshot.state)) throw new Error("restored semantic state differs from the snapshot");
+    if (snapshot.format === FORMAT_V2) {
+      const live = await readStateParts(request, tracker, { byteLength: text => Buffer.byteLength(text), sha256: digestText, partBytes: snapshot.part_bytes });
+      const expected = snapshot.parts.filter(part => part.section !== "journal").map(part => part.records_digest);
+      const actual = live.parts.map(part => part.recordsDigest);
+      if (live.context.x_mutation_revision !== revision || live.context.project_id !== snapshot.state.project_id || canonical(expected) !== canonical(actual)) throw new Error("restored semantic state differs from the snapshot");
+    } else {
+      const restored = await capture(request, tracker);
+      if (restored.context.x_mutation_revision !== revision || canonical(restored.state) !== canonical(snapshot.state)) throw new Error("restored semantic state differs from the snapshot");
+    }
     console.log(JSON.stringify({ recovery: "VERIFIED", tracker, digest: envelope.integrity.digest, mutation_revision: revision, journal: "archived-source-not-replayed", authorization: "new-credentials-required" }));
   } catch {
     throw new Error(`recovery stopped after ${completed} acknowledged batch(es); destination may contain partial effects. Inspect it; do not retry an uncertain write or overwrite it`);

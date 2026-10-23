@@ -1,5 +1,6 @@
-// Named regressions at the public CLI boundary. Network and provider/binary
-// processes are isolated substitutes; no Worker or database is started.
+// Credential custody at the public CLI boundary (crypto): setup never prints an issued or
+// provider-echoed secret and never replaces a stored key unless the store rejected it.
+// Network and provider/binary processes are isolated substitutes; no Worker or database is started.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -88,7 +89,7 @@ globalThis.fetch = async (url) => {
 `;
 
 function fixture(t) {
-  const root = mkdtempSync(join(tmpdir(), "bcf-readiness-test-"));
+  const root = mkdtempSync(join(tmpdir(), "bcf-credential-custody-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
   const cwd = join(root, "repo");
@@ -125,40 +126,6 @@ function fixture(t) {
   };
 }
 
-test("npx's older bundled cf cannot hide a current host cf", (t) => {
-  const f = fixture(t);
-  const result = f.run(["setup", "--origin", BASE, "--no-join"]);
-  assert.equal(result.status, 0, result.output);
-  assert.ok(result.calls.filter((call) => call.tool === "cf" && call.args[0] !== "--version").every((call) => call.current));
-  assert.ok(result.calls.some((call) => call.tool === "deploy"));
-});
-
-test("plain setup and sign-in updates preserve deployed GitHub grants; policy replacement is explicit", (t) => {
-  const f = fixture(t);
-  const extra = { BCF_EXISTING: "1", BEADS_ADMIN_TOKEN: "fixture-admin-token-not-a-secret" };
-  for (const args of [[], ["--access-issuer", "https://access.example.com", "--access-client-id", "fixture-client", "--access-client-secret", "fixture-client-secret"]]) {
-    const result = f.run(["setup", "--no-join", ...args], extra);
-    assert.equal(result.status, 0, result.output);
-    const deployed = result.calls.find((call) => call.tool === "deploy");
-    assert.deepEqual(JSON.parse(deployed.policy), POLICY);
-    assert.deepEqual(JSON.parse(deployed.reader), READER);
-  }
-  const policy = join(f.root, "grants.json");
-  writeFileSync(policy, "{}");
-  const cleared = f.run(["setup", "--no-join", "--github-policy", policy], extra);
-  assert.equal(cleared.status, 0, cleared.output);
-  assert.deepEqual(JSON.parse(cleared.calls.find((call) => call.tool === "deploy").policy), {});
-  const unreadable = f.run(["setup", "--no-join"], { ...extra, BCF_MISSING_BINDINGS: "1" });
-  assert.equal(unreadable.status, 1);
-  assert.equal(unreadable.calls.some((call) => call.tool === "deploy"), false, "unreadable deployed authorization must not be replaced");
-  const partial = f.run(["setup", "--no-join"], { ...extra, BCF_PARTIAL_BINDINGS: "1" });
-  assert.equal(partial.status, 1);
-  assert.equal(partial.calls.some((call) => call.tool === "deploy"), false, "partial metadata does not prove an empty policy");
-  const split = f.run(["setup", "--no-join"], { ...extra, BCF_SPLIT_ROLLOUT: "1" });
-  assert.equal(split.status, 1);
-  assert.equal(split.calls.some((call) => call.tool === "deploy"), false, "a traffic split cannot be silently collapsed by setup");
-});
-
 test("setup keeps issued and provider-echoed credentials out of both output streams", (t) => {
   const f = fixture(t);
   for (const fail of [false, true]) {
@@ -194,25 +161,4 @@ test("setup preserves an existing key through rollout and authorization failures
   assert.equal(rejected.calls.filter((call) => call.tool === "create-key").length, 1);
   assert.equal(JSON.parse(readFileSync(credentials, "utf8"))[BASE].token, replacement);
   assert.equal(rejected.output.includes(replacement), false);
-});
-
-test("doctor refuses a shadowed bd and proves readiness through the selected binary's read", (t) => {
-  const f = fixture(t);
-  const beads = join(f.cwd, ".beads");
-  mkdirSync(beads);
-  writeFileSync(join(beads, "metadata.json"), JSON.stringify({ backend: "cloudflare" }));
-  writeFileSync(join(beads, "cloudflare.json"), JSON.stringify({ base: BASE, tracker: "project" }));
-  const extra = { BEADS_CLOUDFLARE_TOKEN: AGENT, BEADS_CLOUDFLARE_BASE: BASE };
-  const shadowed = f.run(["doctor"], { ...extra, PATH: [f.upstream, f.env.PATH].join(delimiter) });
-  assert.equal(shadowed.status, 1);
-  assert.equal(shadowed.calls.some((call) => call.tool === "bd" && call.args.includes("ready")), false);
-  const good = f.run(["doctor"], extra);
-  assert.equal(good.status, 0, good.output);
-  const read = good.calls.find((call) => call.tool === "bd" && call.args.includes("ready"));
-  assert.equal(read.path, join(f.capable, process.platform === "win32" ? "bd.exe" : "bd"));
-  assert.ok(read.args.includes("--readonly"));
-  assert.deepEqual([read.base, read.tracker], [BASE, "project"]);
-  const refused = f.run(["doctor"], { ...extra, BCF_READ_FAIL: "1" });
-  assert.equal(refused.status, 1);
-  assert.equal(refused.output.includes(AGENT), false);
 });

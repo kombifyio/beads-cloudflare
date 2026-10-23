@@ -1,7 +1,8 @@
 // The tracker HTTP API: /t/{tracker} + the upstream /v0 path. A declared profile of the bd serve contract.
 import { scopeRefusal, type ApiContext } from "../auth/provider";
 import { trackerAllowed } from "../auth/scopes";
-import { forbiddenTracker, NO_SUCH_ROUTE, problemOut, Refusal, invalid } from "../tracker/problem";
+import { forbiddenTracker, NO_SUCH_ROUTE, problemOut, Refusal, invalid, rejectedWrite } from "../tracker/problem";
+import { inspectIdentity } from "../auth/identity";
 import type { Out } from "../tracker/problem";
 import type { ReclaimFilter } from "../tracker/lifecycle";
 import type { ReadyFilter } from "../tracker/ready";
@@ -208,6 +209,7 @@ function readCall(op: ReadOp, id: string | undefined, url: URL, base: Call): Cal
         labelAny: q.list("label_any"),
         excludeLabel: q.list("exclude_label"),
         parent: q.str("parent"),
+        externalRef: q.str("external_ref"),
         all: q.bool("all"),
         includeTemplates: q.bool("include_templates"),
         includeGates: q.bool("include_gates"),
@@ -346,7 +348,7 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
     }
     if (matched.kind === "context") {
       new Query(url.searchParams).finish();
-      return respond({ status: 200, body: await storeFor(env).contextOf(tracker) }, requestId);
+      return respond({ status: 200, body: { ...await storeFor(env).contextOf(tracker), x_identity: inspectIdentity(principal, base.agent, ctx.auth.expiresAt) } }, requestId);
     }
 
     const store = storeFor(env);
@@ -378,7 +380,7 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
     const out = await store.write(matched.op, { ...base, id: matched.id, body, filter, ifMatch, idem, preserveProvenance });
     return respond(out, requestId);
   } catch (e) {
-    if (e instanceof Refusal) return respond(e.out, requestId);
+    if (e instanceof Refusal) return respond(matched.kind === "write" ? rejectedWrite(e.out) : e.out, requestId);
     console.error("tracker request failed", e instanceof Error ? e.message : e);
     return respond(problemOut("internal", "internal server error"), requestId);
   }

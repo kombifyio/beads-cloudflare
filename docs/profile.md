@@ -71,7 +71,39 @@ name carries the core type and semantics or is absent.
 | `status` on update | Validated against `open, in_progress, blocked, deferred, closed, pinned, hooked`; upstream stores any value. | Safer; tightening. |
 | Events | The journal is always on, `seq` is strictly increasing across the whole team and `listEvents` filters by tracker, so a tracker's sequence numbers can skip. Nothing is pruned, so `events_journal_truncated` and `events_journal_disabled` are never answered. `issue` snapshots omit `is_blocked`. Memories write no events. | One store per team. |
 | Timestamps | RFC 3339 UTC with millisecond precision. | |
-| Lease expiry | `lease_expires_at` is emitted on a live claim with its core meaning. Upstream's default lease is 5 minutes; this server's is 30. | See the lease extension. |
+| Lease expiry | `lease_expires_at` is emitted on a live claim with its core meaning. Upstream's default lease is 5 minutes; this server's is 2 hours, and the holder's own writes renew it. A lapsed lease is released by the store itself (below). | See the claim lock. |
+| `in_progress` | A status patch to `in_progress` is a claim by the caller (assignee, lease, fencing number); upstream stores the bare status. An empty `assignee` on an in-progress issue releases it (status `open`). A create or an import that carries `in_progress` stores it as given, unleased. | In-progress work is locked or it is not in progress. |
+| Claim holder | A claim is held by the verified principal and the worker name (`actor`) that took it; upstream compares the actor alone. | One GitHub user's sessions share one principal. |
+
+## Declared conformance deviations (`bd` backend)
+
+The `bd/` client is held to the upstream `v1.3.1` live conformance suite on every pull request
+(`scripts/pair-proof.sh`). Its reclaim fixtures are adjusted as declared below; this is a
+profile-adjusted upstream suite, not an unmodified upstream run. The release gate admits exactly the
+eight below (`knownFailures` in `scripts/conformance-result.mjs`): any other failure, a skipped
+check or fewer than 60 checks fails the run, so a fix elsewhere cannot hide a new break. Line
+numbers are from upstream `v1.3.1`.
+
+The upstream reclaim fixtures assume a fresh default lease expires before their one-hour
+future cutoff (`backend/conformance/claim.go:168`, `reclaim_scope.go:43,95`). This profile's
+declared two-hour lease does not. `scripts/prepare-conformance-fixtures.mjs` qualifies the
+exact pinned upstream commit and both fixture file hashes, then changes only those three
+fixture calls to a three-hour future cutoff (and updates the scope fixture's comment).
+All assertions, including the fresh-lease refusal and scope filters, remain unchanged.
+The complete suite still runs, with no skipped checks and the same minimum of 60 results;
+neither reclaim failure is allowlisted. The receipt printed before the suite records the
+upstream commit, original and adjusted hashes, transformation hash and both horizons.
+The adjustment lives in a temporary upstream source copy selected only by the test's
+temporary Go modfile. The Go module cache, committed module files, native binary builds,
+two-hour server default and signed `older_than` cutoff semantics are unchanged.
+
+| Check | What upstream asserts | Why this backend cannot pass it | Closes when |
+|---|---|---|---|
+| `TransactionReadYourWrites`, `TransactionSnapshotReads`, `TransactionSearchIncludeDependencies`, `TransactionSearchFilterParity` | Reads inside `RunInTransaction` see the closure's own earlier writes, from one snapshot. | A transaction is one atomic `issues:batchApply` plan (`bd/cloudflare/store_tx.go`): writes are queued and land together or not at all, so before the plan lands there is nothing to read back. Applying writes one by one would give read-your-writes but lose all-or-nothing, which every caller of a transaction depends on. | The server gains a staged transaction (open, read, commit) that keeps the plan atomic. |
+| `HeartbeatRenewsLease` | A heartbeat with `issueops.WithLeaseTTL(ctx, time.Hour)` pushes `lease_expires_at` past now plus 30 minutes (`backend/conformance/claim.go:127-143`). | The TTL sits under an unexported context key and its reader is in an `internal/` package (`internal/storage/issueops/lease.go:28-43,121-125`), so an out-of-tree backend cannot learn the value. The server's two-hour default now satisfies this assertion, but does not prove that the requested one-hour override was honoured; the named allowance remains pending upstream support. | Upstream exports the reader: [proposal 1](upstream-proposals.md#1-export-a-reader-for-the-lease-ttl). |
+| `SearchPaging` | A read whose `MaxRows` cap fires answers `*ErrTooManyRows` (`backend/conformance/reader_contract.go:888-900`). | The cap is enforced with the same counts and wording (`checkMaxRows` in `bd/cloudflare/select.go`), but the type lives in `internal/storage/issueops/errors.go:51`, which this module cannot construct, so `errors.As` fails. | Upstream re-exports the type: [proposal 3](upstream-proposals.md#3-export-the-row-cap-error). |
+| `Portable` | The whole engine surface, including molecule progress and last activity, wisps and ephemeral promotion, comment import, `bd rename`, delete by source repository, dependent counts by status and the all-edges iterator. | Each of these is answered with `ErrUnsupported` and listed with its reason in the generated allowlists behind `Unsupported()` (`bd/cloudflare/convert.go`), which the suite's unsupported contract walks and passes. One further case expects a comment count the server stores differently. | Each operation is added to the server profile as it is needed; the allowlist shrinks with it. |
+| `Audit` | Cascade and bulk delete, imports with `SkipDependencyValidationErrors=false`, and the reference engine's readiness rules. | Cascade and bulk delete are unsupported as above. The merge import drops and reports an edge it cannot store instead of failing the batch, so the strict import mode is refused rather than approximated. Readiness follows the server's documented rules (`docs/semantics.md`, "Blocked") where they differ from the reference: blocking inherited through a parent chain, dependent counts across edge types, an ancestor-cycle error, and one closed-at comparison. | The server adopts the reference readiness rules, or upstream marks them engine-specific. |
 
 ## Extensions
 
@@ -97,45 +129,25 @@ The upstream `expected_version` (equal to `revision`) is accepted on update, clo
 answers the same way with `param: expected_version`. Capability token
 `profile.optimistic_concurrency`.
 
-### Lease and fencing (`profile.lease`)
+### Lease and fencing (`profile.lease`, `profile.claim_lock_v1`)
 
-- `claimIssue` and `claimNextIssue` accept `x_lease_seconds` (integer 1..86400, default 1800) and
-  answer an extra response member `x_fencing_token` (integer, incremented on every real claim); for
-  `claimNext` it sits beside `claimed`.
-- A claim stores `lease_expires_at`. The holder claiming again before expiry renews the lease and
-  answers `already_claimed: true` with the unchanged token; the renewal bumps `revision` and
-  `updated_at` and appends an `update` event with `x_event_type: lease_renewed`.
-- An `in_progress` issue whose lease has expired is claimable again by anyone, through `claimIssue` and
-  through `claimNextIssue` (its scan is the ready set plus expired in-progress rows), and the new claim
-  gets a higher token. Nothing reverts a lapsed claim on its own; it stays `in_progress` until claimed
-  again, released or closed.
+Work on an issue is locked by a **claim**: status `in_progress`, an assignee (the worker), a lease and a fencing number. Nothing else holds an issue; an assignee on an open, blocked or deferred issue is a plain allocation of work to a name.
+
+- **Starting work is a claim.** `claimIssue` and `claimNextIssue` take one, and so does an `updateIssue` that moves an issue to `in_progress`, re-asserts `in_progress` on an issue nobody holds, or sets an assignee on an in-progress issue: the verified principal takes the claim under the worker name the request asserts (or the assignee it names), with the default lease (7200 s) and a raised fencing number. A bare status therefore cannot mark work started without locking it. `in_progress` together with an empty `assignee` is `400`; an empty `assignee` alone on an in-progress issue gives the claim up and the issue is `open` again; a status patch does not take an issue allocated to another name (`409 already_claimed`, `force_assignee_transfer` takes it).
+- **The holder is a principal and a worker.** A claim records the verified principal (`claimed_by`) and the worker name (`assignee`). The holder is the request whose principal and worker name both match: every session of one GitHub user shares one principal, so the worker name (the native `--actor` or `BEADS_ACTOR`, the MCP `worker_actor`) is what keeps two such sessions apart, and another principal under the same worker name is refused too. The worker name is cooperative, not authentication: it separates sessions that do not mean to collide.
+- **Lease and fencing.** `claimIssue` and `claimNextIssue` accept `x_lease_seconds` (integer 1..86400, default 7200) and answer `x_fencing_token` (incremented on every real claim, and when a lapse, a takeover or an override ends one). The holder claiming again before expiry renews the lease to the TTL it names and answers `already_claimed: true` with the unchanged token. `heartbeat` renews it without a claim. Implicit renewals keep a long piece of work locked without anyone asking: any `updateIssue` of the holder that changes something, and any comment under its worker name (a comment writes no version), push the lease out to the default and only ever extend it. Explicit renewals append a `lease_renewed` event.
+- **A lapsed claim releases itself.** Every read and write of a tracker first releases its claims whose lease has passed: the issue is `open` and unassigned, `started_at` is cleared, the fencing number is raised (the lapsed holder's token is stale) and one `update` event is written with `x_event_type: lease_expired`, actor `system:lease-expiry` and the lapsed worker as `x_client_actor`. The hourly cron releases the lapsed claims of idle trackers the same way. `claimNextIssue` still scans expired in-progress rows. An in-progress row with no lease at all (a status set by hand before this rule, an import) holds nobody: any caller may claim or change it, and it is reported as `x_claim.state: unleased`.
+- **Claims migration (once).** The first activation after the claim lock arrived released every lock that predates real claims: an assignee on a non-closed, non-pinned issue that no live lease holds (a Dolt-era import, a hand-set assignee, a long-expired lease). Only the lock state changed (assignee, lease, heartbeat and holder cleared, fencing raised, a `claim_migrated` event that keeps the cleared assignee as `x_client_actor`); the issue's content and status are untouched, so a task set in progress by hand stays in progress and is simply unleased, and a closed issue keeps its assignee as history. Allocations made after the migration are not touched. The counts per tracker are in the `claims_migrated` log line and in `meta`.
 
 #### The claim rule
 
-A claim is *held* while the issue is `in_progress`, has an assignee and has a lease; it is *live* until
-`lease_expires_at`. Claim-sensitive changes are: a `status` or `assignee` change through `updateIssue`,
-`closeIssue`, and `releaseIssue`. They go through one guard, in this order:
+A claim is *held* while the issue is `in_progress`, has an assignee and has a lease; it is *live* until `lease_expires_at`. Claim-sensitive changes are: a `status` or `assignee` change through `updateIssue`, `closeIssue` and `releaseIssue`, and (with the same `claimed_by_other` refusal, but no fencing token and no override) a claim and a heartbeat. Content edits (title, description, notes, priority, labels, parent), comments and dependency changes are not claim-sensitive, as upstream: any caller may make them (a presented fencing token is still checked). A non-holder's edit neither takes nor renews the claim; the live holder's own content edit or comment renews its lease. Naming the assignee a row already has changes nothing. The claim-sensitive changes go through one guard, in this order:
 
-1. A presented `x_fencing_token` (accepted on `updateIssue`, `closeIssue` and `releaseIssue`) that is not
-   the issue's current number is `409 precondition_failed`, `param: x_fencing_token`,
-   `reason: stale_claim`, with the members `x_fencing_token` (presented) and
-   `x_current_fencing_token`.
-2. While the claim is live and held by another principal, the change is `409 already_claimed` with
-   `reason: claimed_by_other`, `assignee` and `issue_status`. The overrides are the ones upstream
-   already has: `force` on release and `force_assignee_transfer` on update.
-3. Once the lease has expired anyone may act (claims are advisory in upstream Beads, and closing an
-   abandoned item is normal), and the change raises the fencing number by one, as does an override of a
-   live claim. The previous holder's number is then stale, so it cannot act on the item afterwards.
+1. A presented `x_fencing_token` (accepted on `updateIssue`, `closeIssue` and `releaseIssue`) that is not the issue's current number is `409 precondition_failed`, `param: x_fencing_token`, `reason: stale_claim`, with the members `x_fencing_token` (presented) and `x_current_fencing_token`.
+2. While the claim is live and held by another worker or principal, the change is `409 already_claimed` with `reason: claimed_by_other`, `assignee`, `x_claimed_by`, `x_same_principal`, `x_lease_expires_at` and `issue_status`, and a detail that names the holder, the expiry and what to do. The overrides are the ones upstream already has: `force` on release and `force_assignee_transfer` on update, and on release a supervisor with the same credential that names the holder in `expected_assignee` (a stale name is `precondition_failed`).
+3. Once the lease has expired the issue is released before the request runs, so anyone may act, and the fencing number was raised by that release; an override of a live claim raises it too.
 
-The claimant is the principal that took the claim. It may change `assignee` and `status` on its own
-live claim through `updateIssue` without `force_assignee_transfer`, as upstream lets the holder move its
-own assignment (`AuthorizeAssigneeTransferWithPools`: the holder matches the actor). A second fence on
-`patch.assignee` that upstream also has (an `in_progress` row assigned to someone else is not reassigned
-without `expected_assignee` or `force_assignee_transfer`) therefore applies to every other principal, and
-not once the lease has lapsed; an assignment that never had a lease is held to it as upstream holds it.
-
-Without a token and without a live foreign claim, upstream behavior applies unchanged. Closing an
-already closed issue is idempotent and raises nothing.
+The holder may change `assignee` and `status` on its own live claim through `updateIssue` without `force_assignee_transfer`: a new assignee hands the claim to that name (new lease, new fencing number). Without a token and without a live foreign claim, upstream behavior applies unchanged. Closing an already closed issue is idempotent and raises nothing.
 
 ### Import (`profile.import`, scope `beads:import`)
 
@@ -290,6 +302,16 @@ quiescence, private custody, lease handling, batch limits and the distinction fr
 
 ### Bulk export (`profile.issues_export`, `profile.dependencies_export`, scope `beads:read`)
 
+The existing issue list and `issues:export` accept an optional, nonempty `external_ref`
+query parameter. It selects the exact stored reference, with case preserved, inside
+the authenticated tracker and intersects the other filters. It does not select only
+the first match: every duplicate remains visible through the normal cursor pages;
+status and type defaults still apply. Unknown parameters and repeated single-valued
+parameters remain invalid. The native client retains its local equality check and
+exhaustive pagination. With an older store, only a structured `400 invalid_argument`
+with `param: external_ref` and `reason: unknown_parameter` permits the previous full
+read followed by local filtering; authentication and transport failures never do.
+
 The read twin of the import route, for a client that has to read a whole tracker (a JSONL export, a
 migration check, a listing that decorates every row) without one request per issue.
 
@@ -381,7 +403,7 @@ kinds, and refs (`{key}` backward, or `{id}`) as everywhere in a plan:
 | Kind | Payload | Does | Result item |
 |---|---|---|---|
 | `x_dep_remove` | `{source: Ref, target: Ref}` | Removes the edge between them (journals `dep_remove`). | `{kind, issue_id: source, depends_on_id: target, changed, revision: "0"}`; `changed` is `false` when there was no edge |
-| `x_comment` | `{target: Ref, text}` | Adds a comment as `addComment` does (author is the verified principal; the plan's `actor` is `x_client_actor`). | `{kind, issue_id, changed: true, revision}` |
+| `x_comment` | `{target: Ref, text}` | Adds a comment as `addComment` does (author is the verified principal; the plan's `actor` is `x_client_actor`). | `{kind, issue_id, x_comment_id, changed: true, revision}` |
 | `x_set_config` | `{key, value}` | Writes a setting as `POST /config` does (`issue_prefix` allowed; `status.custom` and `types.custom` project, and later items of the plan see them). | `{kind, key, changed, revision: "0"}` |
 | `x_unset_config` | `{key}` | Removes a setting as `DELETE /config/{key}` does. | `{kind, key, changed, revision: "0"}` |
 
@@ -394,6 +416,8 @@ child keeps a hierarchical id inside one plan.
 
 - `GET /admin/trackers` (administrators only): one entry per tracker with `issues`, `by_status`,
   `memories` and `settings` counts, to verify a migration without SQL.
+- `GET /admin/health` (administrators only): store size, row counts, error rate and write latency since the previous
+  sample, with the alert thresholds (see [`operations.md`](operations.md#store-health-and-alerts)).
 - `POST /t/{tracker}/v0/beads/config` with `{key, value}` is kept from the first release
   (`profile.config_post`); unlike `PUT /config/{key}` it may write `issue_prefix`.
 - Capability tokens `profile.heartbeat` (`POST /issues/{id}:heartbeat`) and `profile.leases_reclaim`
@@ -405,7 +429,8 @@ child keeps a hierarchical id inside one plan.
   serves, both `MAJOR.MINOR.PATCH`. They are not part of the upstream document; the bd backend in this repository compares
   them with its own version on connect (see [`compatibility.md`](compatibility.md)). A client that ignores them still works.
 - `EventRecord.x_event_type`: the upstream audit event type (`created`, `claimed`, `unclaimed`,
-  `closed`, `reopened`, `commented`, `dependency_added`, `dependency_removed`, plus `lease_renewed`).
+  `closed`, `reopened`, `commented`, `dependency_added`, `dependency_removed`, plus `lease_renewed`,
+  `lease_expired` and `claim_migrated`).
   Re-adding an edge with different stored metadata appends a `dep_add` event; an identical re-add does
   not.
 - `EventRecord.x_client_actor`: the `actor` (or `author`) the caller asserted in the request body,
@@ -465,3 +490,76 @@ validated by this server only, bound to this resource, never forwarded anywhere,
 Results are the operation's JSON body as structured content; failures set `isError` and carry the
 Problem body. Write tools take `mutation_id`. Defaults of the tool layer (not of the HTTP contract):
 `issue_type` `task`, `priority` 2.
+
+The governed set serves hosts that reach the store only over MCP (for example a claude.ai connector):
+`beads_ready`, `beads_show`, `beads_list`, `beads_search` (text over title and description, or a raw
+`bd query` expression), `beads_create`, `beads_update`, `beads_comment`, `beads_close` and
+`beads_block` (a `blocks` dependency). After each governed write the tool reads the bead again in a
+separate store call and returns `{receipt, result, readback}`; `receipt` is
+`BEADS_REMOTE_WRITE_OK repo=<tracker> tracker=cloudflare route=mcp op=<tool> id=<id> revision=<n>`
+and is issued only when the readback shows the write. Otherwise the tool fails with
+`readback_mismatch`; the write may have landed, so read it back and do not replay it. A retry with the
+same `mutation_id` is answered from the first result and compared with the bead as it is now, so a
+later edit by someone else can also report `readback_mismatch`.
+
+### Completion evidence and outcomes
+
+`beads_close` accepts `evidence_comment` and `fencing_token`. Evidence uses one existing
+`issues:batchApply` transaction with the guarded close first and `x_comment` second.
+The short reason still allows at most 255 Unicode characters without control characters.
+Long evidence belongs in the comment. An invalid close, stale revision or stale fencing
+token rolls back both operations. The result names the comment with `x_comment_id`;
+a separate read must show that exact comment, text, author, reason and closed status.
+Send `mutation_id` before the first attempt and retain it for inspection and an exact
+idempotent repeat. A new ID is a new operation.
+
+Batch `close` also accepts `x_fencing_token` under `profile.batch_close_fencing`.
+`profile.batch_comment_id` advertises exact comment IDs in batch results. These are
+additive extensions; the native batch remains limited to 100 items.
+
+After a write transaction refuses and rolls back, its Problem includes
+`x_outcome: "rejected"` and `x_mutation_applied: false` under
+`profile.rejected_write_outcome`. HTTP input validation before a write has the same
+marker. Text bound refusals report `reason: "text_too_long"`, `x_limit`, `x_actual`,
+`x_unit` and `x_repair`. A network error or missing acknowledgement carries no such
+guarantee. Governed MCP reports `unknown` for a lost write acknowledgement,
+`applied_unverified` for a failed or mismatched readback, and `verified` with a receipt
+only after semantic readback. Inspect uncertain operations before another mutation.
+
+### Principal and claim inspection
+
+Authenticated HTTP context and MCP `tracker_context` expose `x_identity` with the
+caller's verified subject/email/name/kind, separately asserted `worker_actor` and
+authorized tracker list. HTTP context carries credential expiry when the auth provider
+supplies it. No token is returned. MCP writes accept `worker_actor` for allocation and
+provenance, like the native actor and `X-Beads-Agent` header. It never changes the
+verified principal used by authorization and claim guards.
+
+Issue reads and exports expose derived `x_claim` under `profile.claim_inspection`:
+`state` (`none` for an issue that is not in progress, `unleased` for an in-progress issue with no
+lease, `live`, `expired`), `verified_principal` (null for legacy rows without a recorded
+principal), `assignee` (the holder's worker name), `lease_expires_at`, `heartbeat_at`,
+`fencing_token` and `reclaimable`. Inspection neither renews nor reclaims a lease.
+Imports ignore it and logical snapshots omit it. The native `bd show` and `bd list` print the
+core members `assignee`, `lease_expires_at` and `heartbeat_at` of a claimed issue (`Lease: expires
+in 29 mins (heartbeat just now)`); the principal, the state and the fencing number are in
+`x_claim`, because the upstream issue type has no member for them and the native client is not
+patched. A worker name is cooperative: it separates sessions that share one credential
+principal, it does not authenticate them.
+
+### Portfolio actionable work
+
+`GET /portfolio/actionable` and read-only MCP `beads_actionable_work` return
+`beads.actionable.v1`. Optional `trackers` selects a comma-separated HTTP list or MCP
+array; `worker`, `allow_shared_repo` and `limit` control selection. Each store reports
+its read time, mutation revision, counts with status denominators, or an explicit
+`inaccessible`/`unavailable` result. A partial report never represents missing stores
+as empty. Reads are fresh and revision-stable within each tracker, not atomic across
+trackers. HTTP responses have `Cache-Control: no-store`.
+
+Native ready membership keeps its existing semantics. Actionability separately
+excludes waiting labels, planning containers, active claims, held repositories and
+unsupported foreign blockers, and explains each exclusion. Hierarchy and foreign
+references have resolution/status metadata. Cross-tracker references remain
+informational to the native scheduler. Claim a selection through the governed writer
+and re-read it before work. This projection does not reserve work.

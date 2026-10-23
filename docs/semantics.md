@@ -88,9 +88,11 @@ Handlers `internal/httpapi/{claim,claim_next,release,close,reopen}.go`; storage
   assignee other than the actor is refused `409 already_claimed` with `assignee` and `issue_status`
   (`claim.go:162-188`, `:295-312`); any other non-claimable status is `409 not_claimable` with
   `issue_status`. Readiness, dependencies, `defer_until` and the `pinned` flag are **not** checked.
-  The holder claiming again while `in_progress` is `200` with `already_claimed: true` and no write
-  (`:143-149`). A real claim sets `assignee`, `status=in_progress`, `started_at` once, and writes the
-  `claimed` event.
+  The holder claiming again while `in_progress` is `200` with `already_claimed: true` (the lease is
+  renewed here, `docs/profile.md`). A real claim sets `assignee`, `status=in_progress`, `started_at` once,
+  and writes the `claimed` event. Differences here (`docs/profile.md`, "Lease and fencing"): an
+  `in_progress` row that no live lease holds (lapsed, or never leased) is claimable by anyone, the holder is
+  the principal and the worker name together, and a status patch to `in_progress` is a claim.
 - **claimNext** (`claim.go:248-301`): the ready scan with `Unassigned` forced and no limit, ordered
   as above, claims the first row (rows lost to a race are skipped). Nothing claimable is **`200` with
   `{}`**: the `claimed` member is simply absent (`claim_next.go:104-116`, `apigen/types.gen.go:844-847`).
