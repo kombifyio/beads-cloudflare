@@ -10,6 +10,21 @@ versions may break). The store, `bd` and the setup tool carry one version, the `
 - Store health monitoring: `GET /admin/health`, hourly health samples and threshold alerts.
 - Claim lock: a status of `in_progress` is a claim held by the principal and the worker name, the holder's writes renew the 2-hour lease, a lapsed lease releases itself with a `lease_expired` event, and a one-time migration releases locks that predate real claims (assignee, lease and holder only; status and content untouched).
 
+## 0.2.6 (2026-10-24)
+
+
+### Bug Fixes
+
+* **deploy:** adopt current cf beta.21 for Worker publication (#165) (abd88f6)
+
+## 0.2.5 (2026-10-24)
+
+
+### Bug Fixes
+
+* **auth:** admit exact-target OIDC reader for schema admission (#158) (982153b)
+* **preview:** retain safe journey failure evidence (#157) (10b23fe)
+
 ## 0.2.4 (2026-10-23)
 
 

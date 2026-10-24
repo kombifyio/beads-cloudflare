@@ -15,8 +15,10 @@ const READER_WINDOW_MS = 59 * 60_000;
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
 interface OidcPolicy { repository_id: string; workflow_refs: string[] }
 interface AppReadPolicy { app_id: string; installation_id: string; repositories: string[] }
-/** `portfolio_readers`: main-branch workflows of this repository that may read every mapped tracker, never write. */
-interface RepositoryPolicy { trackers: string[]; import?: boolean; oidc?: OidcPolicy; portfolio_readers?: string[] }
+interface AdmissionReader { workflow_ref: string; job_workflow_ref: string; repository_owner_id: string; repository: string; tracker: string }
+type PortfolioReader = string | AdmissionReader;
+/** String readers retain portfolio access; an admission object narrows one reusable caller to one target. */
+interface RepositoryPolicy { trackers: string[]; import?: boolean; oidc?: OidcPolicy; portfolio_readers?: PortfolioReader[] }
 
 /** Exact main-branch workflow refs of one repository; throws on anything else. */
 function mainWorkflowRefs(repository: string, list: unknown): string[] {
@@ -30,6 +32,25 @@ function mainWorkflowRefs(repository: string, list: unknown): string[] {
       !ref.startsWith(`${repository}/.github/workflows/`) || !ref.endsWith("@refs/heads/main") ||
       !/^[A-Za-z0-9_.-]+\.ya?ml$/.test(ref.slice(`${repository}/.github/workflows/`.length, -"@refs/heads/main".length)))) throw new Error();
   return refs as string[];
+}
+
+function readerGrants(repository: string, list: unknown): PortfolioReader[] {
+  if (!Array.isArray(list) || list.length === 0 || list.length > 100) throw new Error();
+  const grants = list.map((grant): PortfolioReader => {
+    if (typeof grant === "string") return mainWorkflowRefs(repository, [grant])[0]!;
+    if (!isObject(grant) || Object.keys(grant).sort().join() !== "job_workflow_ref,repository,repository_owner_id,tracker,workflow_ref" ||
+        typeof grant.repository !== "string" || !REPOSITORY.test(grant.repository) || !isTrackerId(grant.tracker) ||
+        typeof grant.repository_owner_id !== "string" || !/^[1-9][0-9]{0,19}$/.test(grant.repository_owner_id) ||
+        typeof grant.job_workflow_ref !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}\/\.github\/workflows\/[A-Za-z0-9_.-]+\.ya?ml@[0-9a-f]{40}$/.test(grant.job_workflow_ref)) throw new Error();
+    return { workflow_ref: mainWorkflowRefs(repository, [grant.workflow_ref])[0]!,
+      job_workflow_ref: grant.job_workflow_ref, repository_owner_id: grant.repository_owner_id,
+      repository: grant.repository, tracker: grant.tracker as string };
+  });
+  // A broad grant for the same caller must never shadow a targeted admission.
+  for (const grant of grants) if (typeof grant !== "string" &&
+      grants.filter(g => (typeof g === "string" ? g : g.workflow_ref) === grant.workflow_ref).length !== 1) throw new Error();
+  return grants;
 }
 
 function policies(raw: string): Record<string, RepositoryPolicy> {
@@ -52,7 +73,7 @@ function policies(raw: string): Record<string, RepositoryPolicy> {
       // A portfolio reader is bound to this repository's immutable ID, so it needs the oidc entry.
       if (policy.portfolio_readers !== undefined) {
         if (policy.oidc === undefined) throw new Error();
-        policy.portfolio_readers = mainWorkflowRefs(repository, policy.portfolio_readers);
+        policy.portfolio_readers = readerGrants(repository, policy.portfolio_readers);
       }
     }
     return parsed as unknown as Record<string, RepositoryPolicy>;
@@ -101,7 +122,8 @@ function decodeJwtPart(part: string): Uint8Array<ArrayBuffer> {
 }
 
 /** The same RS256 WebCrypto verification used for Access sign-in, with fixed GitHub trust roots. */
-async function oidcIdentity(token: string, repository: string, policy: OidcPolicy | undefined, audience: string): Promise<string> {
+async function oidcIdentity(token: string, repository: string, policy: OidcPolicy | undefined, audience: string,
+  readTarget?: { repository: string; tracker: string; grants: PortfolioReader[] }): Promise<string> {
   try {
     if (!policy) throw new Error();
     const parts = token.split(".");
@@ -139,7 +161,22 @@ async function oidcIdentity(token: string, repository: string, policy: OidcPolic
       typeof claims.workflow_ref !== "string" || !policy.workflow_refs.includes(claims.workflow_ref) ||
       !["push", "workflow_dispatch", "schedule"].includes(claims.event_name as string) ||
       (claims.head_ref !== undefined && claims.head_ref !== "") || (claims.base_ref !== undefined && claims.base_ref !== "")) throw new Error();
-    return `github-exchange:oidc:${policy.repository_id}:${claims.workflow_ref}`;
+    let admission = "";
+    if (readTarget) {
+      const grant = readTarget.grants.find(g => (typeof g === "string" ? g : g.workflow_ref) === claims.workflow_ref);
+      if (!grant) throw new Error();
+      if (typeof grant !== "string") {
+        // Caller main can advance; both signed source claims must describe that same revision.
+        if (grant.repository !== readTarget.repository || grant.tracker !== readTarget.tracker ||
+            claims.repository_owner_id !== grant.repository_owner_id || claims.event_name !== "workflow_dispatch" ||
+            claims.run_attempt !== "1" || claims.job_workflow_ref !== grant.job_workflow_ref ||
+            claims.job_workflow_sha !== grant.job_workflow_ref.slice(-40) ||
+            typeof claims.sha !== "string" || !/^[0-9a-f]{40}$/.test(claims.sha) ||
+            claims.workflow_sha !== claims.sha) throw new Error();
+        admission = `:admission:${claims.sha}:${claims.job_workflow_sha}`;
+      }
+    }
+    return `github-exchange:oidc:${policy.repository_id}:${claims.workflow_ref}${admission}`;
   } catch {
     throw refuse("forbidden", "GitHub Actions identity must match the configured repository and main-branch workflow.");
   }
@@ -221,7 +258,9 @@ export async function exchangeGithub(request: Request, env: Env): Promise<Respon
       if (!grant?.oidc || !grant.portfolio_readers || token.split(".").length !== 3) {
         throw refuse("forbidden", "A configured portfolio reader workflow and its GitHub Actions identity are required.");
       }
-      const identity = await oidcIdentity(token, reader, { repository_id: grant.oidc.repository_id, workflow_refs: grant.portfolio_readers }, env.PUBLIC_ORIGIN);
+      const identity = await oidcIdentity(token, reader, { repository_id: grant.oidc.repository_id,
+        workflow_refs: grant.portfolio_readers.map(g => typeof g === "string" ? g : g.workflow_ref) }, env.PUBLIC_ORIGIN,
+        { repository, tracker, grants: grant.portfolio_readers });
       subject = identity.replace("github-exchange:oidc:", "github-exchange:oidc-reader:");
     } else if (appRead) {
       const reader = appReadPolicy(env.GITHUB_READ_APP ?? "");

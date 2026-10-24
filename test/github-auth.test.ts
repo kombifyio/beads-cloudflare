@@ -294,3 +294,50 @@ it("issues only a configured portfolio reader workflow read-only access to mappe
     expect((await exchange(body, policy(readerOverride), token)).status).toBe(500);
   }
 });
+
+// Sensitive authorization boundary: an immutable reusable admission reads exactly one foreign tracker.
+it("bounds an exact reusable admission reader to its signed source and one target", async () => {
+  const reader = "example/admission";
+  const grant = { workflow_ref: "delivery.yml",
+    job_workflow_ref: "example/shared/.github/workflows/product-delivery.yml@" + "b".repeat(40),
+    repository_owner_id: "2468", repository, tracker: "github" };
+  const mapping = (grants: unknown[] = [grant]) => JSON.stringify({
+    [repository]: { trackers: ["github", "another"], import: true },
+    "example/other": { trackers: ["other"] },
+    [reader]: { trackers: ["admission"], oidc: { repository_id: "8642", workflow_refs: ["bridge.yml"] }, portfolio_readers: grants },
+  });
+  const claims = { repository: reader, repository_id: "8642", repository_owner_id: "2468",
+    workflow_ref: `${reader}/.github/workflows/delivery.yml@refs/heads/main`, workflow_sha: "a".repeat(40), sha: "a".repeat(40),
+    job_workflow_ref: grant.job_workflow_ref, job_workflow_sha: "b".repeat(40), run_attempt: "1",
+    sub: `repo:${reader}:ref:refs/heads/main`, event_name: "workflow_dispatch" };
+  const body = { repository, tracker: "github", credential_type: "github-portfolio-reader", reader };
+  const token = await oidcToken(claims);
+  upstream("/.well-known/jwks", { keys: [{ ...publicJwk, kid: "test-signing-key", alg: "RS256", use: "sig" }] }, 200, undefined, 1, "https://token.actions.githubusercontent.com");
+  const response = await exchange(body, mapping(), token);
+  if (replies[0]?.path === "/.well-known/jwks") replies.shift();
+  expect(response.status).toBe(200);
+  const credential = await response.json() as { token: string; expires_at: string };
+  expect(response.headers.get("Cache-Control")).toBe("no-store");
+  expect(Date.parse(credential.expires_at) - Date.now()).toBeGreaterThan(0);
+  expect(Date.parse(credential.expires_at) - Date.now()).toBeLessThanOrEqual(3600_000);
+  expect((await call("GET", "/t/github/v0/beads/ready", credential.token)).status).toBe(200);
+  expect((await call("GET", "/t/another/v0/beads/ready", credential.token)).status).toBe(403);
+  expect((await call("POST", "/t/github/v0/beads/issues", credential.token, { actor: "reader", title: "denied", issue_type: "task" })).status).toBe(403);
+  expect((await call("POST", "/t/github/v0/beads/issues:import", credential.token, {})).status).toBe(403);
+  expect((await exchange(body, mapping(), await oidcToken({ ...claims, sha: "c".repeat(40), workflow_sha: "c".repeat(40) }))).status).toBe(200);
+  for (const overrides of [{ repository: "fork/admission" }, { repository_id: "1" }, { repository_owner_id: "1" },
+    { workflow_ref: `${reader}/.github/workflows/bridge.yml@refs/heads/main` }, { workflow_sha: "c".repeat(40) },
+    { workflow_sha: undefined }, { sha: undefined }, { sha: "bad", workflow_sha: "bad" }, { job_workflow_ref: grant.job_workflow_ref.replace("b".repeat(40), "c".repeat(40)) },
+    { job_workflow_ref: undefined }, { job_workflow_sha: "c".repeat(40) }, { job_workflow_sha: undefined },
+    { event_name: "push" }, { event_name: "schedule" }, { event_name: "pull_request" }, { event_name: "pull_request_target" },
+    { ref: "refs/heads/feature" }, { run_attempt: "2" }, { run_attempt: 1 }, { run_attempt: undefined },
+    { aud: "https://evil.test" }, { iss: "https://evil.test" }, { exp: 0 }, { head_ref: "feature" }]) {
+    expect((await exchange(body, mapping(), await oidcToken({ ...claims, ...overrides }))).status).toBe(403);
+  }
+  expect((await exchange(body, mapping(), await oidcToken(claims, true))).status).toBe(403);
+  for (const request of [{ ...body, tracker: "another" }, { ...body, repository: "example/other", tracker: "other" },
+    { repository, tracker: "github" }]) expect((await exchange(request, mapping(), token)).status).toBe(403);
+  expect((await exchange({ ...body, scopes: ["beads:write"] }, mapping(), token)).status).toBe(400);
+  // A broad grant cannot silently shadow an exact grant for the same caller workflow.
+  expect((await exchange(body, mapping([grant, "delivery.yml"]), token)).status).toBe(500);
+});
