@@ -9,6 +9,7 @@ import type { ApiContext } from "../auth/provider";
 import { SCOPE_IMPORT, SCOPE_READ, SCOPE_WRITE } from "../auth/scopes";
 import { handleTracker, storeFor } from "../http/endpoint";
 import { archiveSnapshot, expiredSnapshotKeys, SNAPSHOT_MAX_BYTES, type SnapshotRequest } from "./snapshot-core.mjs";
+import { isObject } from "./util";
 
 export const BACKUP_PREFIX = "snapshots/";
 const EVENT_PAGE = 1000;
@@ -71,7 +72,13 @@ export function backupReader(env: Env): SnapshotRequest {
   return async (tracker, suffix) => {
     const response = await handleTracker(new Request(`${env.PUBLIC_ORIGIN}/t/${encodeURIComponent(tracker)}/v0/beads${suffix}`, { method: "GET" }), env, ctx);
     if (!response.ok) { await response.body?.cancel(); throw new Error(`tracker read refused (${response.status})`); }
-    return jsonBody(response);
+    const body = await jsonBody(response);
+    if (suffix === "/context" && env.CF_VERSION_METADATA) {
+      const version = env.CF_VERSION_METADATA;
+      if (!/^[a-f0-9]{40}$/.test(version.tag) || !isObject(body)) throw new Error("scheduled backup requires a source-SHA deployment tag");
+      return { ...body, x_source_sha: version.tag, x_worker_version: version };
+    }
+    return body;
   };
 }
 

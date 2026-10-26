@@ -21,6 +21,8 @@ interface Env {
   BACKUP_BUCKET?: R2Bucket;
   /** Optional JSON {hour, retention_days} for the scheduled backup; see docs/operations.md. */
   BACKUP_POLICY?: string;
+  /** Immutable deployment identity on the internal Worker; its version tag is the delivered source SHA. */
+  CF_VERSION_METADATA?: { id: string; tag: string; timestamp: string };
   /** GitHub App reader private key: a secret or a Secrets Store binding. Optional: roadmaps fail closed without it. */
   GITHUB_READ_APP_KEY?: string | {get(): Promise<string>};
   ACCESS_CLIENT_ID?: string;

@@ -8,7 +8,7 @@ import type { TeamStore } from "../tracker/team-store";
 import { projectWork } from "./policy.mjs";
 
 export type WorkIssue = IssueWithCounts & { status: string; comments?: Comment[]; revision?: string; x_claim?: unknown };
-export type StoreRead = { kind: "ok"; tracker: string; repository: string; revision: number; read_at: string; issues: WorkIssue[]; ready_ids: string[] }
+export type StoreRead = { kind: "ok"; tracker: string; repository: string; revision: number; read_at: string; issues: WorkIssue[]; ready_ids: string[]; identity: ReturnType<typeof inspectIdentity> }
   | { kind: "inaccessible" | "unavailable"; tracker: string; repository: string; reason: string; read_at: string };
 export interface PortfolioDeps { store: DurableObjectStub<TeamStore>; principal: Principal }
 export interface WorkOptions { trackers?: string[]; worker?: string; allowSharedRepo?: boolean; limit?: number; repositoryOrder?: string[]; sharedRepository?: string }
@@ -25,7 +25,7 @@ function issues(value: unknown): WorkIssue[] {
   }
   return value as WorkIssue[];
 }
-async function readStore(deps: PortfolioDeps, repo: Repository): Promise<StoreRead> {
+export async function readStore(deps: PortfolioDeps, repo: Repository): Promise<StoreRead> {
   const base = { tracker: repo.tracker, repository: repo.name, read_at: new Date().toISOString() };
   if (!trackerAllowed(deps.principal, repo.tracker)) return { ...base, kind: "inaccessible", reason: "credential does not grant this tracker" };
   try {
@@ -52,7 +52,7 @@ async function readStore(deps: PortfolioDeps, repo: Repository): Promise<StoreRe
       if (typeof out.status !== "number" || out.status >= 400) throw new Error(`tracker ready returned HTTP ${out.status}`);
       const ready = issues(object(out.body).items);
       const after = await deps.store.contextOf(repo.tracker);
-      if (before.x_mutation_revision === after.x_mutation_revision) return { ...base, kind: "ok", read_at: new Date().toISOString(), revision: after.x_mutation_revision, issues: rows, ready_ids: ready.map(item => item.id) };
+      if (before.x_mutation_revision === after.x_mutation_revision) return { ...base, kind: "ok", read_at: new Date().toISOString(), revision: after.x_mutation_revision, issues: rows, ready_ids: ready.map(item => item.id), identity: inspectIdentity(deps.principal) };
     }
     throw new Error("tracker changed during both reads; retry the fresh query");
   } catch (error) {

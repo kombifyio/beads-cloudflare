@@ -5,6 +5,7 @@ import { readBoundedBody } from '../http/body';
 import { isObject } from '../tracker/util';
 import type { Repository } from './data';
 import { emptyTally, type IssueLite, type Tally } from './modules';
+import { isMilestone, type Conventions } from './labels';
 
 export type MarkerKind = 'pulled' | 'deferred' | 'ahead';
 export interface RoadmapItem { text: string; done: boolean; depth: number; group: string | null; marker?: { kind: MarkerKind; target?: string } }
@@ -21,6 +22,7 @@ export interface RoadmapSource { id: string; name: string; repository: string; g
 const VERSION = String.raw`v?(\d+\.\d+\.\d+)`;
 const HEADING = new RegExp(String.raw`^(#{2,3})\s+(?:M\d+\s*[·:.-]\s*)?v(\d+\.\d+\.\d+)\b\s*(?:[-–—:·]\s*(.*))?$`);
 const ITEM = /^(\s*)[-*+]\s+\[( |x|X)\]\s+(.*)$/;
+const PHASE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 // A move marker names its target version, or stands alone in parentheses or at the start of the item;
 // prose such as "deferred items" is no marker.
 const PULLED_WORDS = String.raw`(?:pulled forward|pulled ahead|vorgezogen)`;
@@ -104,7 +106,7 @@ export function parseRoadmap(markdown: string): ParsedRoadmap {
       const at = (name: string) => { const i = header!.indexOf(name); return i >= 0 && row[i] ? row[i]! : null; };
       const version = /^v?(\d+\.\d+\.\d+)$/.exec(at('version') ?? '')?.[1];
       if (version && !table.has(version)) {
-        table.set(version, { state: at('state'), central: /^C\d+$/.exec(at('central') ?? '')?.[0] ?? null,
+        table.set(version, { state: at('state'), central: PHASE.exec(at('central') ?? at('phase') ?? '')?.[0] ?? null,
           epic: /^[A-Za-z0-9][A-Za-z0-9._-]*$/.exec(at('epic') ?? '')?.[0] ?? null, name: at('stage') ?? at('name') ?? at('milestone') });
       }
       continue;
@@ -112,10 +114,11 @@ export function parseRoadmap(markdown: string): ParsedRoadmap {
     header = null;
     if (!section) continue;
     const meta = plain(line);
-    if (!section.central) section.central = /Central:\s*(C\d+)/i.exec(meta)?.[1] ?? null;
+    // A phase key (any short token) follows `Central:` anywhere in metadata, or `Phase:` at the start of a line.
+    if (!section.central) section.central = (/\bCentral:\s*([A-Za-z0-9][A-Za-z0-9_-]{0,31})/i.exec(meta) ?? /^(?:[-*]\s+)?Phase:\s*([A-Za-z0-9][A-Za-z0-9_-]{0,31})/i.exec(meta))?.[1] ?? null;
     if (!section.epic) section.epic = /Beads epic:\s*([A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9])/i.exec(meta)?.[1] ?? null;
     // State is milestone metadata only beside Central/epic or on its own line, never prose.
-    if (!section.state && (/Central:|Beads epic:|^\s*State:/i.test(meta))) section.state = /\bState:\s*([A-Za-z][A-Za-z _-]*)/i.exec(meta)?.[1]?.trim() ?? null;
+    if (!section.state && (/Central:|^(?:[-*]\s+)?Phase:|Beads epic:|^\s*State:/i.test(meta))) section.state = /\bState:\s*([A-Za-z][A-Za-z _-]*)/i.exec(meta)?.[1]?.trim() ?? null;
     const item = ITEM.exec(line);
     if (item) {
       const body = item[3]!.trim();
@@ -155,15 +158,15 @@ function markCurrent(milestones: RoadmapMilestone[], target: string | null): voi
   for (const m of milestones.slice(index + 1)) for (const item of m.items) if (item.done && !item.marker) item.marker = { kind: 'ahead' };
 }
 
-const isMilestoneEpic = (item: IssueLite) => item.issue_type === 'epic' && (item.labels ?? []).includes('milestone');
 const versionOf = (title: string | undefined) => /v(\d+\.\d+\.\d+)/.exec(title ?? '')?.[1] ?? null;
 const STATUSES = ['open', 'in_progress', 'blocked', 'deferred', 'closed'] as const;
 const OPEN_LIMIT = 60;
 
-/** Whether an epic in a shared tracker belongs to this repository (by label or title prefix). */
-function ownedBy(item: IssueLite, name: string): boolean {
-  const lower = name.toLowerCase();
-  return (item.labels ?? []).some(label => label.toLowerCase() === `repo:${lower}`) || (item.title ?? '').toLowerCase().startsWith(`[${lower}]`);
+/** Whether an epic in a shared tracker belongs to this repository (by the configured repository label or a `[name]` title prefix). */
+function ownedBy(item: IssueLite, name: string, conventions: Conventions): boolean {
+  const lower = name.toLowerCase(), prefix = conventions.repoPrefix.toLowerCase();
+  return (prefix !== '' && (item.labels ?? []).some(label => { const l = label.toLowerCase(); return l === prefix + lower || l.endsWith('/' + lower) && l.startsWith(prefix); }))
+    || (item.title ?? '').toLowerCase().startsWith(`[${lower}]`);
 }
 
 /**
@@ -171,14 +174,16 @@ function ownedBy(item: IssueLite, name: string): boolean {
  * every descendant's status, the open beads and bugs labelled `blocks:v<version>`. Milestone epics
  * absent from the roadmap are returned as `extraEpics`.
  */
-export function linkBeads(parsed: ParsedRoadmap, items: IssueLite[], repoName: string, shared: boolean) {
+export function linkBeads(parsed: ParsedRoadmap, items: IssueLite[], repoName: string, shared: boolean, conventions: Conventions) {
   const byId = new Map(items.map(item => [item.id, item]));
-  const epics = items.filter(isMilestoneEpic).filter(epic => !shared || ownedBy(epic, repoName));
+  const milestone = (item: IssueLite) => isMilestone(conventions, item);
+  const owned = (item: IssueLite) => ownedBy(item, repoName, conventions);
+  const epics = items.filter(milestone).filter(epic => !shared || owned(epic));
   const descendants = new Map<string, IssueLite[]>();
-  const milestoneIds = new Set(items.filter(isMilestoneEpic).map(item => item.id));
+  const milestoneIds = new Set(items.filter(milestone).map(item => item.id));
   let uncovered = 0;
   for (const item of items) {
-    if (isMilestoneEpic(item)) continue;
+    if (milestone(item)) continue;
     let owner: string | undefined;
     const seen = new Set([item.id]);
     for (let parent = item.parent; parent && !seen.has(parent) && seen.size < 32; parent = byId.get(parent)?.parent) {
@@ -186,7 +191,7 @@ export function linkBeads(parsed: ParsedRoadmap, items: IssueLite[], repoName: s
       if (milestoneIds.has(parent)) { owner = parent; break; }
     }
     if (owner) (descendants.get(owner) ?? descendants.set(owner, []).get(owner)!).push(item);
-    else if (item.status !== 'closed' && (!shared || ownedBy(item, repoName))) uncovered++;
+    else if (item.status !== 'closed' && (!shared || owned(item))) uncovered++;
   }
   const linked = new Set<string>();
   for (const m of parsed.milestones) {
@@ -207,7 +212,7 @@ export function linkBeads(parsed: ParsedRoadmap, items: IssueLite[], repoName: s
       }
       if (item.status !== 'closed') open.push({ id: item.id, title: item.title ?? item.id, status: item.status ?? 'open', priority: item.priority ?? 2, type: item.issue_type ?? 'task', blocking });
     };
-    for (const item of items) if ((item.labels ?? []).includes(blockLabel) && (!shared || ownedBy(item, repoName) || descendants.get(epic?.id ?? '')?.includes(item))) consider(item, true);
+    for (const item of items) if ((item.labels ?? []).includes(blockLabel) && (!shared || owned(item) || descendants.get(epic?.id ?? '')?.includes(item))) consider(item, true);
     for (const item of epic ? descendants.get(epic.id) ?? [] : []) consider(item, false);
     counts.completion = counts.total ? Math.round(counts.closed / counts.total * 100) : epic?.status === 'closed' ? 100 : 0;
     open.sort((a, b) => Number(b.blocking) - Number(a.blocking) || Number(b.type === 'bug') - Number(a.type === 'bug') ||

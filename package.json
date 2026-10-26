@@ -1,6 +1,6 @@
 {
   "name": "beads-cloudflare",
-  "version": "0.2.6",
+  "version": "0.2.8",
   "private": true,
   "description": "Cloudflare-hosted store for Beads: a declared profile of the bd serve /v0 HTTP contract plus an MCP server.",
   "license": "MIT",
@@ -54,6 +54,6 @@
   },
   "packageManager": "pnpm@12.14.0",
   "engines": {
-    "node": ">=24.22.0"
+    "node": ">=24.22.1 <25 || >=26.12.1"
   }
 }

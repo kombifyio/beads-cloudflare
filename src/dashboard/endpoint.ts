@@ -1,6 +1,8 @@
 import { scopeRefusal, type ApiContext } from '../auth/provider';
 import { trackerAllowed, type Principal } from '../auth/scopes';
-import { handleTracker } from '../http/endpoint';
+import { handleTracker, storeFor } from '../http/endpoint';
+import { readStore } from '../portfolio/read';
+import { projectFocus } from './focus';
 import { portfolioCatalog } from './catalog';
 import { portfolioLabels } from './labels';
 import { isOperatorViewer } from '../admin/endpoint';
@@ -17,6 +19,8 @@ const MODULES_TTL = 300;
 const MILESTONES_PREFIX = 'portfolio:milestones:';
 const ROADMAP_PREFIX = 'portfolio:roadmap:';
 const STATE_KEY = 'portfolio:state';
+const FOCUS_PREFIX = 'portfolio:focus:';
+const FOCUS_TTL = 120;
 
 const HISTORY_PREFIX = 'portfolio:daily:';
 const HISTORY_DAYS = 400;
@@ -83,8 +87,24 @@ export async function handlePortfolio(request: Request, env: Env, ctx: ApiContex
       const key = MILESTONES_PREFIX + await digest(catalog.map(repo => repo.tracker).sort().join(','));
       const cached = url.searchParams.get('fresh') === 'true' ? null : await env.OAUTH_KV.get(key,'json');
       if (cached) return json(cached);
-      const report = await collectMilestones(catalog,read,mapBounded);
+      const report = await collectMilestones(catalog,read,mapBounded,portfolioLabels(env));
       if (!report.repositories.some(repo => repo.error)) await env.OAUTH_KV.put(key,JSON.stringify(report),{expirationTtl:MODULES_TTL});
+      return json(report);
+    }
+    if (url.pathname === '/portfolio/focus') {
+      // One revision-stable read per admitted tracker; shared cache keyed by tracker set like milestones.
+      const key = FOCUS_PREFIX + await digest(catalog.map(repo => repo.tracker).sort().join(','));
+      const cached = url.searchParams.get('fresh') === 'true' ? null : await env.OAUTH_KV.get(key,'json');
+      if (cached) return json(cached);
+      // Parse the conventions before the tracker reads, so a malformed configuration fails without reading.
+      const {conventions} = portfolioLabels(env);
+      const deps = {store:storeFor(env),principal:ctx.props};
+      const trackers = [...new Set(catalog.map(repo => repo.tracker))];
+      const stores = await mapBounded(trackers, tracker => readStore(deps,catalog.find(repo => repo.tracker === tracker)!));
+      // Groups for repository labels come only from admitted catalog entries, so no other repository's metadata surfaces.
+      const report = projectFocus(stores,catalog,conventions);
+      // The cache is an optimization: a refused write must not turn a complete read into a failure.
+      if (!report.partial) await env.OAUTH_KV.put(key,JSON.stringify(report),{expirationTtl:FOCUS_TTL}).catch(() => undefined);
       return json(report);
     }
     if (url.pathname === '/portfolio/health') {
@@ -127,6 +147,8 @@ export async function handlePortfolio(request: Request, env: Env, ctx: ApiContex
       const cached = url.searchParams.get('fresh') === 'true' ? null : await env.OAUTH_KV.get(key,'json');
       if (cached) return json(cached);
       try {
+        // Conventions are parsed first: a malformed configuration must not read as an unavailable tracker below.
+        const {conventions} = portfolioLabels(env);
         const head = {id:source.id,name:source.name,repository:source.repository,group:source.group,catalogId:source.catalogId,fetchedAt:new Date().toISOString()};
         const file = await fetchRoadmap(env,source);
         if (!file) return json({...head,missing:true});
@@ -134,7 +156,7 @@ export async function handlePortfolio(request: Request, env: Env, ctx: ApiContex
         let beads: {extraEpics: unknown[]; uncovered: number; truncated: boolean; error?: string} = {extraEpics:[],uncovered:0,truncated:false};
         try {
           const {items, truncated} = await readIssues(source.tracker,read);
-          beads = {...linkBeads(parsed,items,source.name,source.shared),truncated};
+          beads = {...linkBeads(parsed,items,source.name,source.shared,conventions),truncated};
         } catch { beads.error = 'tracker_unavailable'; }
         const result = {...head,url:file.url,sha:file.sha,lastChanged:file.lastChanged,commitUrl:file.commitUrl,lastVerified:parsed.lastVerified,
           target:parsed.target,milestones:parsed.milestones,markdown:file.markdown,...beads};

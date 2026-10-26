@@ -10,6 +10,32 @@ versions may break). The store, `bd` and the setup tool carry one version, the `
 - Store health monitoring: `GET /admin/health`, hourly health samples and threshold alerts.
 - Claim lock: a status of `in_progress` is a claim held by the principal and the worker name, the holder's writes renew the 2-hour lease, a lapsed lease releases itself with a `lease_expired` event, and a one-time migration releases locks that predate real claims (assignee, lease and holder only; status and content untouched).
 
+## 0.2.8 (2026-10-26)
+
+
+### Bug Fixes
+
+* **ci:** pin product-delivery to the registry version-path guard (f4a10ebf) (#185) (129ef2f)
+
+## 0.2.7 (2026-10-25)
+
+
+### Features
+
+* **dashboard:** configurable label conventions with neutral defaults (#182) (eeac8f9)
+* **recovery:** restore the pinned Beads archive through the native window (#180) (f32d013)
+
+
+### Bug Fixes
+
+* **auth:** open the OAuth browser without cmd.exe on Windows (platform-f4ggj.11) (#168) (6a2c8b7)
+* **backup:** bind scheduled archives to immutable source identity (#176) (fa12553)
+* **ci:** adopt Node security workflow producers (#173) (e5be646)
+* **dashboard:** apply second-model review of the focus views (#178) (a80a7f6)
+* **delivery:** call the Delivery producer with the fixed public surface scan (#175) (6d2f06f)
+* **portfolio:** project verified native claim ownership (#169) (6cbc427)
+* **toolchain:** patch Beads Node runtimes and the edge image pin (#171) (f75219f)
+
 ## 0.2.6 (2026-10-24)
 
 

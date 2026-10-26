@@ -47,6 +47,9 @@ Host trust: `BEADS_CLOUDFLARE_TRUSTED_ORIGINS` (exact origins, comma-separated) 
 
 ```sh
 # once per repository, then commit the generated .beads files
+# (a repository that already commits its tracker configuration outside .beads/
+#  keeps that configuration and ignores .beads/cloudflare.json as a host-local
+#  projection; see below)
 npx --yes github:kombifyio/beads-cloudflare join https://beads.example.com --tracker project --github-repository your-team/project --trust-store
 # every new clone
 BEADS_CLOUDFLARE_TRUSTED_ORIGINS=https://beads.example.com npx --yes github:kombifyio/beads-cloudflare bootstrap
@@ -157,6 +160,8 @@ bearer_token_env_var = "BEADS_CLOUDFLARE_TOKEN"
 ```json
 { "tracker": "main", "base": "https://<your-origin>", "token_env": "BEADS_CLOUDFLARE_TOKEN", "github_repository": "your-team/project" }
 ```
+
+A repository that already commits its tracker configuration outside `.beads/` keeps that configuration: its own `.beads/.gitignore` ignores `.beads/cloudflare.json` as a host-local projection, and `.beads/metadata.json` is committed with `"backend": "cloudflare"`. The ignore file `join` writes for a standalone installation does the opposite and commits `.beads/cloudflare.json`. Two repositories of the maintainers' fleet deviate from this rule: one tracks `.beads/cloudflare.json` instead of ignoring it, and one ignores the whole `.beads/` directory in its root `.gitignore` and therefore commits nothing under `.beads/`, not even `.beads/metadata.json`.
 
 `token_env` names the variable holding the agent key (otherwise bd reads the per-user credential file). Tracker ids match `[a-z0-9]+(-[a-z0-9]+)*`, at most 40 characters, and are created by their first write. `github_repository` is optional and enables the GitHub exchange once host trust exists. Do not edit these files by hand; run `join` again. Credential lookup, refusals and conformance numbers: [`docs/bd-backend.md`](docs/bd-backend.md).
 

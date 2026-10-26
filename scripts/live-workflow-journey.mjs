@@ -39,12 +39,22 @@ export async function verifyLiveWorkflows({ base, token, tracker, outsideTracker
     requireThat(created.body.id === id, 'create changed its explicit fixture identity');
     const initial = (await request(`/portfolio/actionable?trackers=${tracker}&worker=${actor}&allow_shared_repo=true&limit=500`)).body;
     requireThat(initial.partial === false && initial.items?.some(item => item.id === id && item.native_ready && item.actionable), 'fresh executable fixture is absent from actionable work');
+    // The dashboard focus projection reads the Preview catalog: the shared test tracker and the unreadable outside tracker.
+    const focusRow = async () => (await request('/portfolio/focus?fresh=true')).body;
+    if (preview) {
+      const focus = await focusRow(), row = focus.open?.find(item => item.id === id);
+      requireThat(focus.schema === 'beads.focus.v1' && focus.partial === false && focus.stores?.some(item => item.tracker === tracker && item.kind === 'ok') && !focus.stores.some(item => item.tracker === outsideTracker) && row?.status === 'open' && row.ready && !row.container && !row.claim, 'dashboard focus lacks the fresh ready fixture or reads an outside tracker');
+    }
     const claimed = await request(`${path}/issues/${id}:claim`, { method: 'POST', key: randomUUID(), body: { actor, x_lease_seconds: 300 } });
     requireThat(claimed.status === 200, 'claim refused');
     const before = (await request(`${path}/issues/${id}?include_comments=true`)).body;
     requireThat(before.x_claim?.state === 'live' && before.x_claim.assignee === actor && before.x_claim.verified_principal === principal && !before.x_claim.reclaimable, 'claim conflates principal and worker or loses its lease');
     const held = (await request(`/portfolio/actionable?trackers=${tracker}&worker=${actor}&allow_shared_repo=true`)).body;
     requireThat(held.items?.some(item => item.id === id && !item.actionable && item.reasons?.some(reason => reason.code === 'native_claim')), 'portfolio selected an issue with a live native lease');
+    if (preview) {
+      const row = (await focusRow()).open?.find(item => item.id === id);
+      requireThat(row?.claim?.live === true && row.claim.thread === actor && !row.lapsed, 'dashboard focus does not show the live claim as work in progress');
+    }
     const evidence = `Shared-test completion evidence ${randomUUID()}\n${'Observed real hosted workflow. '.repeat(20)}`;
     const batch = (reason, fencing = before.x_claim.fencing_token) => ({ actor, items: [
       { kind: 'close', close: { target: { id }, reason, expected_version: before.revision, x_fencing_token: fencing } },
@@ -82,6 +92,10 @@ export async function verifyLiveWorkflows({ base, token, tracker, outsideTracker
     requireThat(conflict.isError && conflict.structuredContent?.reason === 'idempotency_key_reused' && conflict.structuredContent.x_outcome !== 'rejected' && conflict.structuredContent.x_mutation_applied !== false, 'reused mutation key falsely proves nonmutation');
     const afterConflict = (await request(`${path}/issues/${id}?include_comments=true`)).body;
     requireThat(afterConflict.status === 'closed' && afterConflict.revision === committed.revision && afterConflict.close_reason === committed.close_reason && afterConflict.comment_count === committed.comment_count && JSON.stringify(afterConflict.comments) === JSON.stringify(committed.comments), 'idempotency conflict lost or changed the committed completion');
+    if (preview) {
+      const focus = await focusRow(), done = focus.recent?.find(item => item.id === id);
+      requireThat(!focus.open?.some(item => item.id === id) && done?.outcome === 'done' && focus.flow?.some(item => item.date === done.closed_at.slice(0, 10) && item.repo === done.repo && item.done > 0), 'dashboard focus does not count the verified completion as done');
+    }
     const report = (await request(`/portfolio/actionable?trackers=${tracker}&worker=${actor}`)).body;
     const store = report.stores?.find(item => item.tracker === tracker);
     const ready = (await request(`${path}/ready:count`)).body;
