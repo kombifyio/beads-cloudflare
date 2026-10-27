@@ -1,6 +1,6 @@
 {
   "name": "beads-cloudflare",
-  "version": "0.2.8",
+  "version": "0.2.10",
   "private": true,
   "description": "Cloudflare-hosted store for Beads: a declared profile of the bd serve /v0 HTTP contract plus an MCP server.",
   "license": "MIT",
@@ -41,7 +41,7 @@
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.3",
     "@modelcontextprotocol/server": "2.3.1",
-    "cf": "1.0.0-beta.21",
+    "cf": "1.0.0-beta.23",
     "wrangler": "4.151.3",
     "zod": "4.6.7"
   },

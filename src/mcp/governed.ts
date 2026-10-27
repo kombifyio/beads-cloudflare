@@ -24,6 +24,30 @@ const sameScalars = (sent: Scalars, stored: Issue) => SCALARS.every((f) => sent[
 const hasLabels = (stored: Issue, present: string[] = [], absent: string[] = []) =>
   present.every((l) => stored.labels?.includes(l)) && !absent.some((l) => stored.labels?.includes(l));
 
+const REASON_LIMIT = 255;
+const reasonProblem = (reason: string) => [...reason].length > REASON_LIMIT || /[\p{Cc}\u2028\u2029]/u.test(reason);
+
+/** The one-line summary of an overlong or multiline reason: its first nonempty line, cut at a word boundary, ending in an ellipsis. */
+function summarizeReason(reason: string): string {
+  const line = reason.split(/[\r\n\u2028\u2029]+/u).map((part) => part.replace(/[\p{Cc}\s]+/gu, " ").trim()).find(Boolean) ?? "Closed";
+  const chars = [...line];
+  if (chars.length <= REASON_LIMIT) return line;
+  const head = chars.slice(0, REASON_LIMIT - 1);
+  const space = head.lastIndexOf(" ");
+  return `${(space >= 120 ? head.slice(0, space) : head).join("").trimEnd()}…`;
+}
+
+/**
+ * A close reason holds at most 255 characters without line breaks. A longer or multiline one is not refused: its
+ * first line becomes the reason and the complete text becomes the evidence comment of the same atomic close.
+ */
+export function fitCloseReason<T extends { reason?: string; evidence_comment?: string }>(a: T): T {
+  const full = a.reason?.trim();
+  if (!full || !reasonProblem(a.reason!)) return a;
+  const evidence_comment = a.evidence_comment ? `Close reason (full text):\n${full}\n\n${a.evidence_comment}` : full;
+  return { ...a, reason: summarizeReason(full), evidence_comment };
+}
+
 export function registerGoverned(server: McpServer, deps: ToolDeps): McpServer {
   const actor = deps.principal.email;
   const id = z.string().min(1).describe("Issue id.");
@@ -50,6 +74,7 @@ export function registerGoverned(server: McpServer, deps: ToolDeps): McpServer {
     map: (a: z.infer<z.ZodObject<S>>) => Partial<Call>,
     target: (a: z.infer<z.ZodObject<S>>, written: Json) => string | undefined,
     verify: (a: z.infer<z.ZodObject<S>>, written: Json, stored: Issue) => boolean,
+    normalize: (a: z.infer<z.ZodObject<S>>) => z.infer<z.ZodObject<S>> = (a) => a,
   ) => {
     server.registerTool(
       name,
@@ -58,7 +83,7 @@ export function registerGoverned(server: McpServer, deps: ToolDeps): McpServer {
         if (!deps.canWrite) return SCOPE_ERROR;
         const { tracker: t, mutation_id, worker_actor, ...rest } = args as z.infer<z.ZodObject<S>> & { tracker: string; mutation_id?: string; worker_actor?: string };
         if (!trackerAllowed(deps.principal, t)) return resultOf(rejectedWrite(forbiddenTracker(t)));
-        const a = rest as z.infer<z.ZodObject<S>>;
+        const a = normalize(rest as z.infer<z.ZodObject<S>>);
         const call = workerCall({ tracker: t, principal: deps.principal, agent: deps.agent, ...map(a) }, worker_actor);
         if (mutation_id) call.idem = { key: `mcp:${mutation_id}`, hash: await sha256Hex(canonicalJson({ tool: name, tracker: t, args: rest, worker_actor })) };
         let out: Out;
@@ -158,10 +183,10 @@ export function registerGoverned(server: McpServer, deps: ToolDeps): McpServer {
     (a) => ({ id: a.id, body: { author: actor, text: a.text } }),
     (a) => a.id, (_a, w, s) => (s.comments ?? []).some((c) => c.id === w.id));
 
-  write("beads_close", "Close a bead. An optional evidence_comment is stored atomically with the close; its exact id must read back before success.", {
+  write("beads_close", "Close a bead. An optional evidence_comment is stored atomically with the close; its exact id must read back before success. A reason over 255 characters or with line breaks is split automatically: its first line becomes the reason and the full text the evidence comment.", {
     id,
     reason: z.string().optional(),
-    evidence_comment: z.string().min(1).optional().describe("Long completion evidence. The short reason remains limited to 255 characters."),
+    evidence_comment: z.string().min(1).optional().describe("Long completion evidence. The reason holds at most 255 characters; a longer or multiline reason is moved here automatically."),
     force: z.boolean().optional(),
     expected_version: z.string().optional(),
     fencing_token: z.number().int().optional(),
@@ -177,7 +202,7 @@ export function registerGoverned(server: McpServer, deps: ToolDeps): McpServer {
     const results = Array.isArray(w.items) ? w.items : [];
     const comment = results.find((r: Json) => r.kind === "x_comment");
     return typeof comment?.x_comment_id === "string" && (s.comments ?? []).some((c) => c.id === comment.x_comment_id && c.text === a.evidence_comment && c.author === actor);
-  });
+  }, fitCloseReason);
 
   write("beads_block", "Record that id is blocked by blocked_by (a blocks dependency); the readback must show the edge.", {
     id,

@@ -5,6 +5,7 @@
 // `scripts/tracker-snapshot.mjs verify|restore` reads either shape. A tracker that moves between reads
 // is retried at the next hourly run; no tracker is mutated. Without the binding nothing runs
 // (see docs/operations.md).
+import { z } from "zod";
 import type { ApiContext } from "../auth/provider";
 import { SCOPE_IMPORT, SCOPE_READ, SCOPE_WRITE } from "../auth/scopes";
 import { handleTracker, storeFor } from "../http/endpoint";
@@ -13,6 +14,20 @@ import { isObject } from "./util";
 
 export const BACKUP_PREFIX = "snapshots/";
 const EVENT_PAGE = 1000;
+const MAX_TRACKER_CHECKS_PER_RUN = 128;
+const PROGRESS_KEY = "backup-progress/scheduled.json";
+const PROGRESS_LEASE_MS = 20 * 60_000;
+const progressSchema = z.object({
+  version: z.literal(1),
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  last_tracker: z.string().max(128).nullable(),
+  pending_tracker: z.string().max(128).nullable(),
+  lease_until: z.number().int().nonnegative(),
+  run_id: z.string().uuid(),
+}).strict();
+type BackupProgress = z.infer<typeof progressSchema>;
+const MAX_SWEEP_MS = 4 * 60_000;
+const SCHEDULED_RESIDENT_BYTES = 8 << 20;
 
 export interface BackupPolicy {
   /** First UTC hour of the day at which the daily backup runs; later hours retry what failed. */
@@ -104,36 +119,82 @@ export async function runScheduledBackup(env: Env, now = new Date()): Promise<vo
   const policy = backupPolicy(env);
   if (now.getUTCHours() < policy.hour) return;
   const day = now.toISOString().slice(0, 10);
-  const read = backupReader(env);
-  const trackers = (await storeFor(env).trackerSummary()).map((t) => t.tracker);
+  const started = Date.now();
+  const savedProgress = await bucket.get(PROGRESS_KEY);
+  if (savedProgress && savedProgress.size > 1024) throw new Error("scheduled backup progress exceeds its byte budget");
+  const previous = savedProgress ? progressSchema.parse(await savedProgress.json()) : null;
+  if (previous && previous.lease_until > started) throw new Error("scheduled backup sweep already in progress");
+  let progress: BackupProgress = {
+    version: 1, day,
+    last_tracker: previous?.day === day ? previous.last_tracker : null,
+    pending_tracker: null,
+    lease_until: started + PROGRESS_LEASE_MS,
+    run_id: crypto.randomUUID(),
+  };
+  let progressETag = savedProgress?.etag;
+  const checkpoint = async (next: BackupProgress) => {
+    const saved = await bucket.put(PROGRESS_KEY, JSON.stringify(next), {
+      onlyIf: progressETag ? { etagMatches: progressETag } : { etagDoesNotMatch: "*" },
+      httpMetadata: { contentType: "application/json" },
+    });
+    if (!saved) throw new Error("scheduled backup progress changed; sweep stopped");
+    progressETag = saved.etag;
+    progress = next;
+  };
+  await checkpoint(progress);
   const failed: string[] = [];
-  for (const tracker of trackers) {
+  if (previous?.pending_tracker) {
+    failed.push(previous.pending_tracker);
+    console.error(JSON.stringify({ event: "store_backup_interrupted", day: previous.day, tracker: previous.pending_tracker, run_id: previous.run_id }));
+  }
+  const read = backupReader(env);
+  const trackers = (await storeFor(env).trackerSummary()).map((t) => t.tracker)
+    .sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  const remaining = trackers.filter((tracker) => progress.last_tracker === null || tracker > progress.last_tracker);
+  let checked = 0;
+  let attempted = 0;
+  for (const tracker of remaining) {
+    if (checked >= MAX_TRACKER_CHECKS_PER_RUN || Date.now() - started >= MAX_SWEEP_MS) break;
+    await checkpoint({ ...progress, last_tracker: tracker, pending_tracker: tracker });
+    checked += 1;
     const key = `${BACKUP_PREFIX}${tracker}/${day}.snapshot.json`;
-    if (await bucket.head(key)) continue;
     try {
-      await deletePrefix(bucket, `${BACKUP_PREFIX}${tracker}/${day}/`);
-      const archived = await archiveSnapshot(read, tracker, {
-        origin: env.PUBLIC_ORIGIN, byteLength: bytes, eventLimit: EVENT_PAGE, now: () => now, sha256,
-        emit: async (item) => {
-          const objectKey = item.role === "part" ? `${BACKUP_PREFIX}${tracker}/${day}/${item.name}` : key;
-          const source = item.envelope.payload.source;
-          // R2 rejects the upload if the stored bytes do not hash to the checksum computed here.
-          await bucket.put(objectKey, item.body, { sha256: await sha256(item.body), httpMetadata: { contentType: "application/json" }, customMetadata: {
-            digest: item.envelope.integrity.digest, format: item.envelope.payload.format,
-            ...(item.role === "part"
-              ? { section: String(item.envelope.payload.section ?? "") }
-              : { mutation_revision: String(source?.mutation_revision ?? ""), source_sha: source?.source_sha ?? "" }),
-          } });
-        },
-        abort: async (names) => deleteKeys(bucket, names.map((name) => (name === "manifest" || name === "archive" ? key : `${BACKUP_PREFIX}${tracker}/${day}/${name}`))),
-      });
-      console.log(JSON.stringify({ event: "store_backup", tracker, key, digest: archived.digest, bytes: archived.bytes, parts: archived.parts, format: archived.format, mutation_revision: archived.mutation_revision }));
+      if (!await bucket.head(key)) {
+        attempted += 1;
+        await deletePrefix(bucket, `${BACKUP_PREFIX}${tracker}/${day}/`);
+        const archived = await archiveSnapshot(read, tracker, {
+          origin: env.PUBLIC_ORIGIN, byteLength: bytes, eventLimit: EVENT_PAGE, now: () => now, sha256,
+          residentBytes: SCHEDULED_RESIDENT_BYTES,
+          emit: async (item) => {
+            const objectKey = item.role === "part" ? `${BACKUP_PREFIX}${tracker}/${day}/${item.name}` : key;
+            const source = item.envelope.payload.source;
+            // R2 rejects the upload if the stored bytes do not hash to the checksum computed here.
+            await bucket.put(objectKey, item.body, { sha256: await sha256(item.body), httpMetadata: { contentType: "application/json" }, customMetadata: {
+              digest: item.envelope.integrity.digest, format: item.envelope.payload.format,
+              ...(item.role === "part"
+                ? { section: String(item.envelope.payload.section ?? "") }
+                : { mutation_revision: String(source?.mutation_revision ?? ""), source_sha: source?.source_sha ?? "" }),
+            } });
+          },
+          abort: async (names) => deleteKeys(bucket, names.map((name) => (name === "manifest" || name === "archive" ? key : `${BACKUP_PREFIX}${tracker}/${day}/${name}`))),
+        });
+        console.log(JSON.stringify({ event: "store_backup", tracker, key, digest: archived.digest, bytes: archived.bytes, parts: archived.parts, format: archived.format, mutation_revision: archived.mutation_revision }));
+      }
     } catch (e) {
       failed.push(tracker);
       console.error(JSON.stringify({ event: "store_backup_failed", tracker, key, error: e instanceof Error ? e.message : String(e) }));
     }
+    await checkpoint({ ...progress, pending_tracker: null });
   }
-  await pruneSnapshots(bucket, policy.retention_days, now);
+  const unchecked = remaining.length - checked;
+  if (unchecked) {
+    console.log(JSON.stringify({ event: "store_backup_pending", day, checked, attempted, unchecked_trackers: unchecked, cursor: progress.last_tracker }));
+  } else {
+    await checkpoint({ ...progress, last_tracker: null });
+    await pruneSnapshots(bucket, policy.retention_days, now);
+    console.log(JSON.stringify({ event: "store_backup_sweep", day, checked, attempted, failed: failed.length }));
+  }
+  await checkpoint({ ...progress, last_tracker: unchecked ? progress.last_tracker : null, pending_tracker: null, lease_until: 0 });
   if (failed.length) throw new Error(`store backup failed for ${failed.join(", ")}`);
 }
 

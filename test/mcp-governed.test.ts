@@ -78,6 +78,19 @@ it("returns an independent readback receipt for every governed write", async () 
   expect(again.structuredContent.readback.id).toBe(id);
 });
 
+it("closes with an overlong or multiline reason by moving its full text into the evidence comment", async () => {
+  const token = await tokenFor("governed@example.com");
+  const t = "governed";
+  const id = (await tool(token, "beads_create", { tracker: t, title: "long reason proof" })).structuredContent.readback.id as string;
+  const full = `Summary line of the close.\n${"Overlong reason text that must survive in full. ".repeat(12)}`;
+  const closed = await tool(token, "beads_close", { tracker: t, id, reason: full });
+  expect(closed.isError).toBeFalsy();
+  expect(closed.structuredContent.receipt).toMatch(RECEIPT);
+  const shown = (await tool(token, "beads_show", { tracker: t, id })).structuredContent;
+  expect(shown).toMatchObject({ status: "closed", close_reason: "Summary line of the close." });
+  expect(shown.comments.map((c: { text: string }) => c.text)).toContain(full.trim());
+});
+
 // Sensitive boundary: a signed-in human reaches only the stores the repository policy maps.
 it("scopes a signed-in user to the trackers the repository policy maps", async () => {
   const policy = { GITHUB_REPOSITORIES: JSON.stringify({ "example/project": { trackers: ["mapped"] } }) };
