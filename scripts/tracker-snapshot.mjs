@@ -184,29 +184,73 @@ export function restoreBatches(snapshot) {
   return batches;
 }
 
+const requestOperations = new Map([
+  ["/context", "context"], ["/issues:export", "issues-export"], ["/dependencies:export", "dependencies-export"],
+  ["/memories", "memories"], ["/config:export", "settings-export"], ["/config:statuses:detailed", "statuses"],
+  ["/config:types", "types"], ["/events", "events"], ["/issues:import", "restore-import"],
+]);
+const errorTypes = ["Error", "TypeError", "SyntaxError", "AggregateError", "AbortError", "TimeoutError"];
+const transportCodes = ["UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"];
+
+// Only closed enums and bounded numbers cross the subprocess/receipt boundary.
+// Never retain messages, request URLs, bodies, headers or arbitrary child stderr.
+export function snapshotFailureEvidence(value) {
+  if (value?.schema !== "beads.snapshot-failure.v1") return undefined;
+  const evidence = { schema: value.schema };
+  if (["backup", "verify", "restore"].includes(value.command)) evidence.command = value.command;
+  const request = value.request;
+  if ([...requestOperations.values(), "other"].includes(request?.operation) && ["GET", "POST", "PUT", "DELETE"].includes(request.method)) {
+    evidence.request = { operation: request.operation, method: request.method,
+      error_type: errorTypes.includes(request.error_type) ? request.error_type : "unknown" };
+    if (Number.isSafeInteger(request.elapsed_ms) && request.elapsed_ms >= 0 && request.elapsed_ms <= 86_400_000) evidence.request.elapsed_ms = request.elapsed_ms;
+    if (Number.isInteger(request.http_status) && request.http_status >= 100 && request.http_status <= 599) evidence.request.http_status = request.http_status;
+    if (transportCodes.includes(request.transport_code)) evidence.request.transport_code = request.transport_code;
+  }
+  const child = value.subprocess;
+  if (child && Number.isSafeInteger(child.elapsed_ms) && child.elapsed_ms >= 0 && child.elapsed_ms <= 86_400_000) {
+    evidence.subprocess = { elapsed_ms: child.elapsed_ms };
+    if (Number.isInteger(child.exit_code) && child.exit_code >= 0 && child.exit_code <= 255) evidence.subprocess.exit_code = child.exit_code;
+    if (["SIGINT", "SIGTERM", "SIGKILL", "SIGABRT", "SIGSEGV"].includes(child.signal)) evidence.subprocess.signal = child.signal;
+    if (["deadline", "output-budget", "spawn-error"].includes(child.termination)) evidence.subprocess.termination = child.termination;
+  }
+  return evidence;
+}
+
 function client(base, token) {
   const origin = new URL(base);
   if (origin.protocol !== "https:" || origin.pathname !== "/" || origin.username || origin.password || origin.search || origin.hash || !token) throw new Error("an explicit HTTPS origin and BEADS_SNAPSHOT_TOKEN are required");
   return async (tracker, suffix, method = "GET", body, idempotency) => {
-    const response = await fetch(`${origin.origin}/t/${tracker}/v0/beads${suffix}`, {
-      method, redirect: "error", signal: AbortSignal.timeout(30_000),
-      headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}), ...(idempotency ? { "Idempotency-Key": idempotency } : {}) },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-    if (!response.ok) { await response.body?.cancel(); throw new Error(`tracker request refused: HTTP ${response.status}`); }
-    const reader = response.body.getReader();
-    const chunks = []; let size = 0;
+    const started = Date.now();
+    let response;
     try {
-      for (;;) {
-        const { done, value } = await reader.read(); if (done) break;
-        size += value.byteLength;
-        if (size > MAX_BYTES) throw new Error("one tracker response exceeds the snapshot byte budget");
-        chunks.push(value);
-      }
-    } catch (error) { await reader.cancel().catch(() => {}); throw error; }
-    finally { reader.releaseLock(); }
-    try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-    catch { throw new Error("tracker returned invalid JSON; response content is withheld"); }
+      response = await fetch(`${origin.origin}/t/${tracker}/v0/beads${suffix}`, {
+        method, redirect: "error", signal: AbortSignal.timeout(30_000),
+        headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}), ...(idempotency ? { "Idempotency-Key": idempotency } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      if (!response.ok) { await response.body?.cancel(); throw new Error(`tracker request refused: HTTP ${response.status}`); }
+      const reader = response.body.getReader();
+      const chunks = []; let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read(); if (done) break;
+          size += value.byteLength;
+          if (size > MAX_BYTES) throw new Error("one tracker response exceeds the snapshot byte budget");
+          chunks.push(value);
+        }
+      } catch (error) { await reader.cancel().catch(() => {}); throw error; }
+      finally { reader.releaseLock(); }
+      try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+      catch { throw new Error("tracker returned invalid JSON; response content is withheld"); }
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error("snapshot request failed");
+      failure.snapshotFailure = snapshotFailureEvidence({ schema: "beads.snapshot-failure.v1", request: {
+        operation: requestOperations.get(suffix.split("?")[0]) ?? "other", method,
+        elapsed_ms: Date.now() - started, http_status: response?.status,
+        error_type: error?.name, transport_code: error?.cause?.code ?? error?.code,
+      } });
+      throw failure;
+    }
   };
 }
 
@@ -292,11 +336,17 @@ export async function main(args = process.argv.slice(2)) {
       if (restored.context.x_mutation_revision !== revision || canonical(restored.state) !== canonical(snapshot.state)) throw new Error("restored semantic state differs from the snapshot");
     }
     console.log(JSON.stringify({ recovery: "VERIFIED", tracker, digest: envelope.integrity.digest, mutation_revision: revision, journal: "archived-source-not-replayed", authorization: "new-credentials-required" }));
-  } catch {
-    throw new Error(`recovery stopped after ${completed} acknowledged batch(es); destination may contain partial effects. Inspect it; do not retry an uncertain write or overwrite it`);
+  } catch (error) {
+    throw Object.assign(new Error(`recovery stopped after ${completed} acknowledged batch(es); destination may contain partial effects. Inspect it; do not retry an uncertain write or overwrite it`),
+      { snapshotFailure: snapshotFailureEvidence(error?.snapshotFailure) });
   }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(error => { console.error(error.message); process.exitCode = 1; });
+  main().catch(error => {
+    const failure = snapshotFailureEvidence(error?.snapshotFailure);
+    console.error(error.message);
+    if (failure) console.error(JSON.stringify({ snapshot_failure: { ...failure, command: process.argv[2] } }));
+    process.exitCode = 1;
+  });
 }

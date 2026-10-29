@@ -10,6 +10,21 @@ versions may break). The store, `bd` and the setup tool carry one version, the `
 - Store health monitoring: `GET /admin/health`, hourly health samples and threshold alerts.
 - Claim lock: a status of `in_progress` is a claim held by the principal and the worker name, the holder's writes renew the 2-hour lease, a lapsed lease releases itself with a `lease_expired` event, and a one-time migration releases locks that predate real claims (assignee, lease and holder only; status and content untouched).
 
+## 0.2.12 (2026-10-29)
+
+
+### Bug Fixes
+
+* **deps:** pin cf 1.0.0-beta.26 so the Deploy currency gate passes (#209) (56c80e6)
+
+## 0.2.11 (2026-10-29)
+
+
+### Bug Fixes
+
+* **auth:** admit the CI writers of held contract steps and Stage ledger warnings (#207) (076e87c)
+* **recovery:** keep closed failure diagnostics for Preview recovery runs (#204) (6937a1a)
+
 ## 0.2.10 (2026-10-27)
 
 

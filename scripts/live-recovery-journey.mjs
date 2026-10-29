@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { canonical, captureSnapshot, SNAPSHOT_MAX_BYTES } from '../src/tracker/snapshot-core.mjs';
-import { assertEmptyDestination, verifySnapshot, writePrivateSnapshot } from './tracker-snapshot.mjs';
+import { assertEmptyDestination, snapshotFailureEvidence, verifySnapshot, writePrivateSnapshot } from './tracker-snapshot.mjs';
 
 const requireThat = (ok, message) => { if (!ok) throw new Error(`logical recovery journey: ${message}`); };
 const digest = value => createHash('sha256').update(canonical(value)).digest('hex');
@@ -55,14 +55,23 @@ async function snapshotCommand(command, file, { base, tracker, token }) {
   if (command !== 'verify') args.push('--tracker', tracker, '--quiesced');
   if (command === 'restore') args.push('--exclusive');
   const output = await new Promise((resolve, reject) => {
+    const started = Date.now();
     const child = spawn(process.execPath, args, { env: { ...process.env, BEADS_CLOUDFLARE_BASE: base, BEADS_SNAPSHOT_TOKEN: token }, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', size = 0;
-    child.stdout.on('data', chunk => { size += chunk.length; if (size > 65536) child.kill('SIGTERM'); else stdout += chunk; });
-    // Operator errors contain no response bodies. Keep stderr out of receipts and shared logs.
-    child.stderr.on('data', chunk => { size += chunk.length; if (size > 65536) child.kill('SIGTERM'); });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
-    child.once('error', error => { clearTimeout(timer); reject(error); });
-    child.once('close', (code, signal) => { clearTimeout(timer); code === 0 && size <= 65536 ? resolve(stdout) : reject(new Error(`snapshot ${command} stopped (${signal ?? code}); inspect before another restore`)); });
+    let stdout = '', stderr = '', size = 0, termination;
+    child.stdout.on('data', chunk => { size += chunk.length; if (size > 65536) { termination = 'output-budget'; child.kill('SIGTERM'); } else stdout += chunk; });
+    child.stderr.on('data', chunk => { size += chunk.length; if (size > 65536) { termination = 'output-budget'; child.kill('SIGTERM'); } else stderr += chunk; });
+    const failed = (code, signal) => {
+      let reported;
+      try { reported = snapshotFailureEvidence(JSON.parse(stderr.trim().split('\n').at(-1)).snapshot_failure); }
+      catch { /* Arbitrary operator stderr is never forwarded. */ }
+      return Object.assign(new Error(`snapshot ${command} stopped; inspect before another restore`), {
+        snapshotFailure: snapshotFailureEvidence({ ...reported, schema: 'beads.snapshot-failure.v1', command,
+          subprocess: { elapsed_ms: Date.now() - started, exit_code: code, signal, termination } }),
+      });
+    };
+    const timer = setTimeout(() => { termination = 'deadline'; child.kill('SIGKILL'); }, 120_000);
+    child.once('error', () => { clearTimeout(timer); termination = 'spawn-error'; reject(failed()); });
+    child.once('close', (code, signal) => { clearTimeout(timer); code === 0 && size <= 65536 ? resolve(stdout) : reject(failed(code, signal)); });
   });
   try { return JSON.parse(output.trim().split('\n').at(-1)); }
   catch { throw new Error(`snapshot ${command} acknowledgement is invalid; inspect before another restore`); }
@@ -113,7 +122,8 @@ export async function verifyLogicalRecovery({ base, sourceSha, source, destinati
   // even when backup has not produced an archive yet. Credentials stay in memory.
   writePrivateSnapshot(path.join(directory, 'drill-manifest.json'), `${JSON.stringify({ source_sha: sourceSha, origin: base,
     source: source.tracker, destination: destination.tracker, ids, memory, setting, marker })}\n`);
-  let sourceStarted = false, restoreStarted = false, restoredVerified = false, receipt;
+  let sourceStarted = false, restoreStarted = false, restoredVerified = false, receipt, failure;
+  let stage = 'seed', sourceCleanup, destinationCleanup;
   const clean = async (request, tracker, { allowRestored = false } = {}) => {
     const state = await capture(request, tracker);
     requireThat(state.context.project_id === (allowRestored ? source.tracker : tracker) &&
@@ -139,14 +149,18 @@ export async function verifyLogicalRecovery({ base, sourceSha, source, destinati
     await readSource(source.tracker, '/dependencies:add', 'POST', { actor: 'shared-test-recovery', edges: [{ issue_id: ids[1], depends_on_id: ids[0], type: 'blocks' }] });
     await readSource(source.tracker, '/memories', 'POST', { key: memory, content: marker });
     await readSource(source.tracker, `/config/${setting}`, 'PUT', { value: marker });
+    stage = 'backup';
     const saved = await snapshotCommand('backup', file, { base, ...source });
+    stage = 'verify';
     const checked = await snapshotCommand('verify', file, { base, ...source });
+    stage = 'snapshot-assertion';
     const envelope = JSON.parse(fs.readFileSync(file, 'utf8'));
     const snapshot = verifySnapshot(envelope);
     requireThat(saved.digest === checked.digest && checked.digest === envelope.integrity.digest && snapshot.source.source_sha === sourceSha &&
       canonical(counts(snapshot.state)) === canonical({ issues: 2, dependencies: 1, comments: 1, memories: 1, settings: 1 }), 'snapshot fixture counts or digest differ');
-    restoreStarted = true;
+    stage = 'restore'; restoreStarted = true;
     const restoration = await snapshotCommand('restore', file, { base, ...destination });
+    stage = 'restore-readback';
     const restored = await capture(destination.request, destination.tracker);
     requireThat(restoration.recovery === 'VERIFIED' && restoration.digest === checked.digest && restored.context.x_source_sha === sourceSha &&
       canonical(restored.state) === canonical(snapshot.state), 'independent restore state differs from source');
@@ -155,23 +169,35 @@ export async function verifyLogicalRecovery({ base, sourceSha, source, destinati
       source: { tracker: source.tracker, reused_empty_source: initial.context.x_mutation_revision > 0, store_version: snapshot.source.store_version, mutation_revision: snapshot.source.mutation_revision, counts: counts(snapshot.state), state_sha256: digest(snapshot.state), journal_head: snapshot.journal.head, journal_sha256: digest(snapshot.journal) },
       destination: { tracker: destination.tracker, store_version: restored.context.x_store_version, mutation_revision: restored.context.x_mutation_revision, counts: counts(restored.state), state_sha256: digest(restored.state), journal_head: restored.journal.head, journal_sha256: digest(restored.journal) },
       logical_restore: 'VERIFIED', journal: 'new-import-events-source-journal-archived', exclusions: snapshot.exclusions };
+  } catch (error) {
+    failure = error;
   } finally {
     const cleanupErrors = [];
     if (restoredVerified) {
-      try { receipt.cleanup_destination = await clean(destination.request, destination.tracker, { allowRestored: true }); }
+      try { destinationCleanup = await clean(destination.request, destination.tracker, { allowRestored: true }); receipt.cleanup_destination = destinationCleanup; }
       catch (error) { cleanupErrors.push(error); }
     }
     if (sourceStarted) {
       try {
-        const result = await clean(readSource, source.tracker);
-        if (receipt) receipt.cleanup_source = result;
+        sourceCleanup = await clean(readSource, source.tracker);
+        if (receipt) receipt.cleanup_source = sourceCleanup;
       } catch (error) { cleanupErrors.push(error); }
     }
     if (receipt && cleanupErrors.length === 0) fs.rmSync(directory, { recursive: true, force: true });
     else if (restoreStarted && !restoredVerified) console.error(`logical recovery is uncertain; preserve ${destination.tracker} and private snapshot ${file} for inspection; no restore was replayed`);
     else console.error(`logical recovery did not complete; private snapshot custody retained at ${directory}`);
-    if (cleanupErrors.length) throw new AggregateError(cleanupErrors, `logical recovery cleanup could not be verified; private snapshot retained at ${directory}`);
+    if (cleanupErrors.length) {
+      const original = failure;
+      failure = new AggregateError([...(original ? [original] : []), ...cleanupErrors], `logical recovery cleanup could not be verified; private snapshot retained at ${directory}`);
+      failure.snapshotFailure = snapshotFailureEvidence(original?.snapshotFailure);
+    }
   }
+  if (failure) throw Object.assign(failure, { recoveryEvidence: { source_sha: sourceSha,
+    source: { tracker: source.tracker }, destination: { tracker: destination.tracker }, stage,
+    restore_started: restoreStarted, restored_verified: restoredVerified,
+    cleanup_source: sourceCleanup ? 'verified' : sourceStarted ? 'unknown' : 'not-started',
+    cleanup_destination: destinationCleanup ? 'verified' : restoreStarted ? 'unknown' : 'not-started',
+  } });
   receipt.elapsed_ms = Date.now() - started;
   receipt.report_sha256 = digest(receipt);
   return receipt;
