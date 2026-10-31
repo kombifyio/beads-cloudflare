@@ -1,6 +1,6 @@
 {
   "name": "beads-cloudflare",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "private": true,
   "description": "Cloudflare-hosted store for Beads: a declared profile of the bd serve /v0 HTTP contract plus an MCP server.",
   "license": "MIT",
@@ -29,11 +29,15 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "dev": "wrangler dev --port 8788",
+    "dev": "vp dev --host 127.0.0.1 --port 8788",
+    "dev:wrangler": "wrangler dev --config wrangler.jsonc --port 8788",
+    "build": "vp build",
+    "preview": "vp preview",
     "types": "wrangler types --strict-vars=false",
     "gen": "openapi-typescript spec/upstream/openapi.v0.yaml -o src/generated/openapi.v0.ts",
     "typecheck": "pnpm types && tsc --noEmit",
-    "test": "vitest run",
+    "check": "pnpm types && vp check --no-fmt src test",
+    "test": "vp test run",
     "test:cli": "node --test \"cli/*.test.mjs\"",
     "test:pure": "node --test test/tracker-snapshot.pure.test.mjs scripts/import-prefix.test.mjs",
     "version:sync": "node scripts/sync-version.mjs"
@@ -46,11 +50,14 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.23.0",
+    "@cloudflare/vite-plugin": "1.64.0",
+    "@cloudflare/vitest-plugin": "1.4.11",
     "@types/node": "^26.6.5",
     "openapi-typescript": "7.13.0",
     "typescript": "6.0.3",
-    "vitest": "4.1.0"
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0",
+    "vite-plus": "1.4.0",
+    "vitest": "5.0.5"
   },
   "packageManager": "pnpm@12.14.0",
   "engines": {

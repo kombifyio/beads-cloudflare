@@ -2,5 +2,28 @@ allowBuilds:
   core-js-pure: false
   esbuild: true
   workerd: true
+# Vite+: one pinned version of the toolchain. `vite` is the vite-plus-core build of Vite 8
+# (bundled Vite 8.3.5 at 1.4.0); `vp dev`, `vp build` and `vp test` need every package that
+# imports `vite` to resolve to it. Move both entries together.
+# This package is installed from GitHub by `npx github:kombifyio/beads-cloudflare setup`: npm
+# prepares the clone with its devDependencies and refuses the `catalog:` protocol
+# (EUNSUPPORTEDPROTOCOL), so package.json names the same three versions explicitly and the
+# overrides below make pnpm resolve them from this catalog. Keep the four places in step.
+catalog:
+  vite: npm:@voidzero-dev/vite-plus-core@1.4.0
+  vite-plus: 1.4.0
+  # The Vitest line vite-plus 1.4.0 bundles (`vp --version` lists it). @cloudflare/vitest-plugin
+  # loads vitest from the project root, so the root keeps a direct reference at exactly that
+  # version; a different version here would run two test runners.
+  vitest: 5.0.5
+overrides:
+  vite: "catalog:"
+  vite-plus: "catalog:"
+  vitest: "catalog:"
+# The vite-plus-core alias is version 1.x of the Vite 8 line, so peers that declare
+# `vite ^8` (@cloudflare/vite-plugin) would otherwise warn.
+peerDependencyRules:
+  allowedVersions:
+    vite: "*"
 # Dependencies must stay current through automation (Renovate), so no release-age delay.
 minimumReleaseAge: 0

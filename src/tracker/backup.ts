@@ -27,6 +27,7 @@ const progressSchema = z.object({
 }).strict();
 type BackupProgress = z.infer<typeof progressSchema>;
 const MAX_SWEEP_MS = 4 * 60_000;
+const EPHEMERAL_TRACKER = /^(ci-conformance|restore-drill)-/;
 const SCHEDULED_RESIDENT_BYTES = 8 << 20;
 
 export interface BackupPolicy {
@@ -148,9 +149,12 @@ export async function runScheduledBackup(env: Env, now = new Date()): Promise<vo
     console.error(JSON.stringify({ event: "store_backup_interrupted", day: previous.day, tracker: previous.pending_tracker, run_id: previous.run_id }));
   }
   const read = backupReader(env);
+  // Durable trackers sweep before short-lived CI and drill trackers, so a large backlog of those
+  // never pushes a large, busy authority tracker past the end of its UTC day.
+  const sweepKey = (tracker: string) => (EPHEMERAL_TRACKER.test(tracker) ? "1" : "0") + tracker;
   const trackers = (await storeFor(env).trackerSummary()).map((t) => t.tracker)
-    .sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
-  const remaining = trackers.filter((tracker) => progress.last_tracker === null || tracker > progress.last_tracker);
+    .sort((a, b) => sweepKey(a) < sweepKey(b) ? -1 : sweepKey(a) > sweepKey(b) ? 1 : 0);
+  const remaining = trackers.filter((tracker) => progress.last_tracker === null || sweepKey(tracker) > sweepKey(progress.last_tracker));
   let checked = 0;
   let attempted = 0;
   for (const tracker of remaining) {

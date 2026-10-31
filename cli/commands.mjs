@@ -474,7 +474,10 @@ function prepareDeployProject(report) {
   };
   try {
     copyFileSync(join(PACKAGE_ROOT, "cloudflare.config.ts"), join(dir, "cloudflare.config.ts"));
-    copyFileSync(join(PACKAGE_ROOT, "package.json"), join(dir, "package.json"));
+    // Only what the deployment needs: cf takes a package.json that lists `vite` (the development toolchain) for a Vite
+    // project and delegates the build to `vite build`, which this project does not have. The Worker is built by Wrangler.
+    const { devDependencies: _development, scripts: _scripts, ...manifest } = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
+    writeFileSync(join(dir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     cpSync(join(PACKAGE_ROOT, "src"), join(dir, "src"), { recursive: true });
     symlinkSync(dependencies, link, "junction");
   } catch (error) {

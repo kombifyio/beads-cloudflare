@@ -200,7 +200,7 @@ Database behavior is exercised only against an explicitly authorized hosted test
 | `scripts/` | `build-bd.sh`, `smoke.sh`, `pair-proof.sh`, `sync-version.mjs`, and `latency.mjs`, `claim-race.mjs`, `keys.mjs`, `login.mjs`, `mcp-call.mjs` for a deployed Worker |
 | `docs/`, `test/` | Profile, semantics, compatibility, backend, proposals; black-box tests that run in workerd |
 
-Toolchain: TypeScript is pinned to 6.0.3 (`openapi-typescript` 7.13.0 needs the compiler API that 7.x no longer ships). The test pool's workerd is older than the deployed compatibility date, so `vitest.config.ts` runs at `2026-08-01` while `wrangler.jsonc` and `cloudflare.config.ts` stay at `2026-10-01`; `wrangler.jsonc` is the development/test config, `cloudflare.config.ts` is deployed, and `scripts/check-deploy-config.mjs` keeps them in step. MCP uses the official `@modelcontextprotocol/server` handler directly (no `agents` dependency).
+Toolchain: TypeScript is pinned to 6.0.3 (`openapi-typescript` 7.13.0 needs the compiler API that 7.x no longer ships). The test pool's workerd is older than the deployed compatibility date, so `vite.config.ts` runs the tests at `2026-08-01` while `wrangler.jsonc` and `cloudflare.config.ts` stay at `2026-10-01`; `wrangler.jsonc` is the development/test config, `cloudflare.config.ts` is deployed, and `scripts/check-deploy-config.mjs` keeps them in step. MCP uses the official `@modelcontextprotocol/server` handler directly (no `agents` dependency).
 
 ## License
 

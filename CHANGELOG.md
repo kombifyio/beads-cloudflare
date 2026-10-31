@@ -10,6 +10,18 @@ versions may break). The store, `bd` and the setup tool carry one version, the `
 - Store health monitoring: `GET /admin/health`, hourly health samples and threshold alerts.
 - Claim lock: a status of `in_progress` is a claim held by the principal and the worker name, the holder's writes renew the 2-hour lease, a lapsed lease releases itself with a `lease_expired` event, and a one-time migration releases locks that predate real claims (assignee, lease and holder only; status and content untouched).
 
+## 0.2.13 (2026-10-31)
+
+
+### Features
+
+* **toolchain:** move beads-cloudflare to Vite+ 1.4.0 (platform-uv4ut) (#216) (fed6156)
+
+
+### Bug Fixes
+
+* **backup:** sweep durable trackers before CI and drill trackers (beads-cloudflare-j1i.5) (#215) (b869034)
+
 ## 0.2.12 (2026-10-29)
 
 
