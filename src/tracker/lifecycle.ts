@@ -1,7 +1,7 @@
 // Claim, release, close, reopen and claimNext, following upstream Beads v1.3.1 plus the declared
 // lease/fencing extension (see docs/profile.md and docs/semantics.md).
 import { boundedText, checkMembers, nameMember, optBool, optInt } from "./body";
-import { DEFAULT_LEASE_SECONDS, MAX_LEASE_SECONDS, claimHolder, guardClaim, heldByOther, isHolder, leaseExpired, liveClaim, staleClaim, workerOf } from "./claims";
+import { DEFAULT_LEASE_SECONDS, MAX_LEASE_SECONDS, principalOf, samePrincipal, guardClaim, heldByOther, isHolder, leaseExpired, liveClaim, staleClaim, workerOf } from "./claims";
 import { recordEvent, type Ctx } from "./events";
 import { all, hydratedIssue, issueJson, issueWithCounts, loadIssue, type IssueRow } from "./model";
 import { invalid, issueNotFound, refuse } from "./problem";
@@ -58,7 +58,7 @@ function takeClaim(ctx: Ctx, row: IssueRow, seconds: number): IssueRow {
     `UPDATE issues SET assignee = ?3, status = 'in_progress', started_at = COALESCE(started_at, ?4), updated_at = ?4,
        version = version + 1, lease_expires_at = ?5, heartbeat_at = ?4, claimed_by = ?6, fencing = fencing + 1
      WHERE tracker = ?1 AND id = ?2`,
-    ctx.tracker, row.id, claimAssignee(ctx), ctx.now, expires, ctx.actor,
+    ctx.tracker, row.id, claimAssignee(ctx), ctx.now, expires, principalOf(ctx),
   );
   recordEvent(ctx, { op: "update", kind: "claimed", issueId: row.id });
   return loadIssue(ctx.sql, ctx.tracker, row.id)!;
@@ -237,7 +237,7 @@ export function releaseIssue(ctx: Ctx, id: string, body: Json): Out {
   const row = requireRow(ctx, id);
   // Naming the holder (`expected_assignee`) is how a supervisor with the same credential gives a worker's claim back;
   // the name is checked against the row below, so a stale name is still refused.
-  const supervisor = expected !== undefined && claimHolder(row) === ctx.actor;
+  const supervisor = expected !== undefined && samePrincipal(ctx, row);
   const bump = guardClaim(ctx, row, { token, force: force || supervisor }, "release");
   if (row.status !== "open" && row.status !== "in_progress") throw notReleasable();
   if (expected === undefined && row.assignee === "") throw notReleasable();

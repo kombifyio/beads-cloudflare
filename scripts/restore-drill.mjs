@@ -15,7 +15,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { assertEmptyDestination, readSnapshotFile, snapshotPartPath, writePrivateSnapshot } from "./tracker-snapshot.mjs";
-import { canonical, captureSnapshot, cleanIssue } from "../src/tracker/snapshot-core.mjs";
+import { canonical, captureSnapshot, cleanIssue, SNAPSHOT_MAX_BYTES } from "../src/tracker/snapshot-core.mjs";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
 
@@ -38,7 +38,21 @@ async function call(token, pathname, method = "GET", body) {
     headers: { Authorization: `Bearer ${token}`, "X-Beads-Agent": "restore-drill",
       ...(body ? { "Content-Type": "application/json", "Idempotency-Key": randomUUID() } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}) });
-  const text = await response.text();
+  const reader = response.body?.getReader();
+  const chunks = []; let size = 0;
+  if (reader) {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > SNAPSHOT_MAX_BYTES) throw new Error("restore drill response exceeds its byte budget");
+        chunks.push(value);
+      }
+    } catch (error) { await reader.cancel().catch(() => {}); throw error; }
+    finally { reader.releaseLock(); }
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
   if (!response.ok) { const e = new Error(`${method} ${pathname.replace(/\/t\/[^/]+/, "/t/<tracker>")} refused: HTTP ${response.status}${pathname.startsWith("/admin") ? ` ${text.slice(0, 200)}` : ""}`); e.status = response.status; throw e; }
   return text ? JSON.parse(text) : {};
 }
@@ -105,18 +119,29 @@ try {
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(REPO, "scripts", "tracker-snapshot.mjs"), "restore", privateFile, "--tracker", scratch, "--quiesced", "--exclusive"],
       { cwd: REPO, env: { ...process.env, BEADS_CLOUDFLARE_BASE: BASE, BEADS_SNAPSHOT_TOKEN: keyD.key, BEADS_ADMIN_TOKEN: "" }, stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "";
-    child.stdout.on("data", c => { out += c; }); child.stderr.on("data", c => { err += c; });
-    child.once("close", code => code === 0 ? resolve(JSON.parse(out.trim().split("\n").at(-1))) : reject(new Error(`restore CLI exited ${code}: ${err.trim().slice(0, 300)}`)));
+    let out = "", size = 0, termination;
+    const receive = (chunk, stdout) => {
+      size += chunk.length;
+      if (size > 65536) { termination = "output-budget"; child.kill("SIGKILL"); }
+      else if (stdout) out += chunk;
+    };
+    child.stdout.on("data", chunk => receive(chunk, true));
+    child.stderr.on("data", chunk => receive(chunk, false));
+    const timer = setTimeout(() => { termination = "deadline"; child.kill("SIGKILL"); }, 120_000);
+    child.once("error", () => { clearTimeout(timer); reject(new Error("restore CLI failed to start")); });
+    child.once("close", code => {
+      clearTimeout(timer);
+      if (code !== 0 || termination) { reject(new Error(`restore CLI stopped (${termination ?? `exit ${code}`}); inspect destination before any retry`)); return; }
+      try { resolve(JSON.parse(out.trim().split("\n").at(-1))); }
+      catch { reject(new Error("restore CLI acknowledgement is invalid; inspect destination before any retry")); }
+    });
   });
   step("restored");
   if (result.recovery !== "VERIFIED" || result.digest !== envelope.integrity.digest) throw new Error("restore acknowledgement differs");
 
   // 4. Independent read of the restored tracker.
   const restored = await capture(dest, scratch);
-  const restoredMatches = canonical(restored.state.issues) === canonical(snap.state.issues) && canonical(restored.state.dependencies) === canonical(snap.state.dependencies) &&
-    canonical(restored.state.memories) === canonical(snap.state.memories) && canonical(restored.state.settings) === canonical(snap.state.settings) &&
-    canonical(restored.state.vocabulary) === canonical(snap.state.vocabulary);
+  const restoredMatches = canonical(restored.state) === canonical(snap.state);
   receipt.restore = { cli: result.recovery, mutation_revision: result.mutation_revision, project_id: restored.state.project_id,
     counts: counts(restored.state), state_sha256: sha(restored.state), semantic_state_equal: restoredMatches,
     issues_sha256: sha(restored.state.issues), dependencies_sha256: sha(restored.state.dependencies) };

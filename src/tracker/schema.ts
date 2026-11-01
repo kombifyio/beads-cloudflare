@@ -131,6 +131,25 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_by_tracker ON events (tracker, seq);
 
+-- Durable resumable batch plans; independent of expiring request receipts.
+CREATE TABLE IF NOT EXISTS operations (
+  tracker TEXT NOT NULL, principal TEXT NOT NULL, id TEXT NOT NULL, plan TEXT NOT NULL,
+  plan_hash TEXT NOT NULL, next_chunk INTEGER NOT NULL, expected_revision INTEGER NOT NULL,
+  created_at TEXT NOT NULL, PRIMARY KEY (tracker, principal, id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS operation_chunks (
+  tracker TEXT NOT NULL, principal TEXT NOT NULL, operation_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL, result TEXT NOT NULL, result_hash TEXT NOT NULL, revision INTEGER NOT NULL,
+  PRIMARY KEY (tracker, principal, operation_id, chunk_index)
+) WITHOUT ROWID;
+
+-- Revision-to-journal fences. A missing revision makes incremental reads fail closed.
+CREATE TABLE IF NOT EXISTS analysis_changes (
+  tracker TEXT NOT NULL, revision INTEGER NOT NULL, start_head INTEGER NOT NULL,
+  end_head INTEGER NOT NULL, full_refresh INTEGER NOT NULL,
+  PRIMARY KEY (tracker, revision)
+) WITHOUT ROWID;
+
 -- Agent API keys: only the SHA-256 of the secret is stored.
 CREATE TABLE IF NOT EXISTS api_keys (
   id TEXT PRIMARY KEY,

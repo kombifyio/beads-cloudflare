@@ -1,3 +1,5 @@
+import { validateEvidence } from "./evidence";
+import { recordEdgeRemoved } from "./edges";
 // deleteIssues, sweepIssues and compareAndSetMetadata.
 //
 // Upstream: internal/httpapi/{delete,sweep,metadata_cas}.go; issueops/{delete_role,delete,sweep,
@@ -45,6 +47,14 @@ function footprint(ctx: Ctx, ids: string[]): { dependencies: number; labels: num
 /** Removes the beads and everything that hangs off them, one `delete` event each. */
 function erase(ctx: Ctx, ids: string[]): void {
   const { sql, tracker } = ctx;
+  const removed = new Set<string>();
+  for (const part of chunks(ids, 45)) {
+    const marks = inList(part.length, 2);
+    for (const edge of all<{ issue_id: string; depends_on_id: string; type: string; metadata: string }>(sql, `SELECT issue_id, depends_on_id, type, metadata FROM dependencies WHERE tracker = ?1 AND (issue_id IN (${marks}) OR depends_on_id IN (${marks}))`, tracker, ...part)) {
+      const key = JSON.stringify([edge.issue_id, edge.depends_on_id]);
+      if (!removed.has(key)) { removed.add(key); recordEdgeRemoved(ctx, edge.issue_id, edge.depends_on_id, edge.type, edge.metadata); }
+    }
+  }
   for (const id of ids) recordEvent(ctx, { op: "delete", kind: "deleted", issueId: id, withIssue: false });
   for (const part of chunks(ids, 45)) {
     const marks = inList(part.length, 2);
@@ -373,6 +383,7 @@ export function compareAndSetMetadata(ctx: Ctx, id: string, body: Json): Out {
   if (same(now, wanted)) return { status: 200, body: view(now) };
   if (wanted.has) setOwn(metadata, key, wanted.value);
   else delete metadata[key];
+  validateEvidence(metadata, row.acceptance_criteria, "value");
   sql.exec(
     "UPDATE issues SET metadata = ?3, updated_at = ?4, version = version + 1 WHERE tracker = ?1 AND id = ?2",
     tracker, id, JSON.stringify(metadata), ctx.now,

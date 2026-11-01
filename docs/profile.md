@@ -135,6 +135,7 @@ Work on an issue is locked by a **claim**: status `in_progress`, an assignee (th
 
 - **Starting work is a claim.** `claimIssue` and `claimNextIssue` take one, and so does an `updateIssue` that moves an issue to `in_progress`, re-asserts `in_progress` on an issue nobody holds, or sets an assignee on an in-progress issue: the verified principal takes the claim under the worker name the request asserts (or the assignee it names), with the default lease (7200 s) and a raised fencing number. A bare status therefore cannot mark work started without locking it. `in_progress` together with an empty `assignee` is `400`; an empty `assignee` alone on an in-progress issue gives the claim up and the issue is `open` again; a status patch does not take an issue allocated to another name (`409 already_claimed`, `force_assignee_transfer` takes it).
 - **The holder is a principal and a worker.** A claim records the verified principal (`claimed_by`) and the worker name (`assignee`). The holder is the request whose principal and worker name both match: every session of one GitHub user shares one principal, so the worker name (the native `--actor` or `BEADS_ACTOR`, the MCP `worker_actor`) is what keeps two such sessions apart, and another principal under the same worker name is refused too. The worker name is cooperative, not authentication: it separates sessions that do not mean to collide.
+- **Ownership fields are opaque subjects.** New `claimed_by`, `x_claim.verified_principal`, refusal `x_claimed_by` and exported claim holders contain the verified subject: `key:<id>` for an ordinary API key, the stable GitHub exchange subject across key rotation, or the OAuth subject. Consumers compare these values as opaque identities and use context `verified_principal.email` or audit authors for display; they must not parse a holder as an email. Legacy OAuth email holders remain accepted. A legacy ordinary-key label is accepted only when the latest custody transition proves the current fencing generation and exactly one historical key; imported or missing custody evidence fails closed.
 - **Lease and fencing.** `claimIssue` and `claimNextIssue` accept `x_lease_seconds` (integer 1..86400, default 7200) and answer `x_fencing_token` (incremented on every real claim, and when a lapse, a takeover or an override ends one). The holder claiming again before expiry renews the lease to the TTL it names and answers `already_claimed: true` with the unchanged token. `heartbeat` renews it without a claim. Implicit renewals keep a long piece of work locked without anyone asking: any `updateIssue` of the holder that changes something, and any comment under its worker name (a comment writes no version), push the lease out to the default and only ever extend it. Explicit renewals append a `lease_renewed` event.
 - **A lapsed claim releases itself.** Every read and write of a tracker first releases its claims whose lease has passed: the issue is `open` and unassigned, `started_at` is cleared, the fencing number is raised (the lapsed holder's token is stale) and one `update` event is written with `x_event_type: lease_expired`, actor `system:lease-expiry` and the lapsed worker as `x_client_actor`. The hourly cron releases the lapsed claims of idle trackers the same way. `claimNextIssue` still scans expired in-progress rows. An in-progress row with no lease at all (a status set by hand before this rule, an import) holds nobody: any caller may claim or change it, and it is reported as `x_claim.state: unleased`.
 - **Claims migration (once).** The first activation after the claim lock arrived released every lock that predates real claims: an assignee on a non-closed, non-pinned issue that no live lease holds (a Dolt-era import, a hand-set assignee, a long-expired lease). Only the lock state changed (assignee, lease, heartbeat and holder cleared, fencing raised, a `claim_migrated` event that keeps the cleared assignee as `x_client_actor`); the issue's content and status are untouched, so a task set in progress by hand stays in progress and is simply unleased, and a closed issue keeps its assignee as history. Allocations made after the migration are not touched. The counts per tracker are in the `claims_migrated` log line and in `meta`.
@@ -563,3 +564,53 @@ unsupported foreign blockers, and explains each exclusion. Hierarchy and foreign
 references have resolution/status metadata. Cross-tracker references remain
 informational to the native scheduler. Claim a selection through the governed writer
 and re-read it before work. This projection does not reserve work.
+
+### Compact analysis and incremental changes
+
+`GET /t/{tracker}/v0/beads/issues:analysis` returns a revision-fenced compact
+projection, not an interchange format. Optional `status`, repeatable or
+comma-separated `ids` (at most 100), `limit` (1–200, default 100), and `cursor`
+select a page. It returns `tracker`, `project_id`, `revision`, `event_head`,
+`evaluated_at`, tracker-wide `counts.by_status`, `items`, `has_more`, and
+`next_cursor`. Items include title, assignee, owner, status, priority, issue
+kind, row `revision`, claim details and evidence summary; title truncation is
+explicit. Cursor pages retain the same evaluation time and fence; a changed
+tracker returns 409. Pages have a 256 KiB response budget and no comments,
+full acceptance text or dependency metadata. Fetch individual issues and
+existing dependency APIs for full detail.
+
+`GET issues:changes?since=<event_head>&since_revision=<revision>` returns
+compact affected rows and `tombstones`. Relationship changes invalidate both
+endpoints. Continue with the returned `next_cursor`, retaining both original
+checkpoint parameters; a changed target revision returns 409. If a revision
+cannot be related safely to the event journal, or a global configuration/import
+change occurred, `full_refresh_required` is true and a new analysis is needed.
+The capabilities are `profile.analysis_v1` and `profile.changes_v1`.
+
+The reserved metadata member `beads_evidence` holds `{version: 1, entries}`
+with at most 32 entries and 32 KiB encoded. Each entry has unique `id`,
+`criterion_id`, lowercase SHA-256 `criterion_digest`, `result` (`pass`,
+`fail`, `blocked`, `not_run`), `source` (URI and revision or digest),
+`environment`, `run_id`, `observed_at`, and optional `disposition` object with `kind`, `reason`, and `authority_uri`. The digest
+is SHA-256 of the exact UTF-8 `acceptance_criteria` text, without normalization.
+Analysis classifies evidence as missing, invalid, stale or recorded and counts
+its claimed results. Historical evidence is retained when criteria change;
+its digest then classifies as stale. Evidence is a claim, not an automatic
+completion or close action. Capability: `profile.evidence_v1`.
+
+### Durable batch operations
+
+A caller holding write scope can `POST operations` with `{operation_id,
+expected_revision, chunks}`. The immutable plan contains 1–100 ordinary
+`issues:batchApply` bodies of 1–100 items each and is at most 3 MiB. The
+response contains `plan_hash` (SHA-256 of canonical sorted-key JSON chunks),
+`next_chunk`, and the new `expected_revision`. `POST
+operations/{operation_id}:advance` with `{expected_index}` applies exactly the
+next chunk and commits its result and revision in the same transaction. A
+conflict never rebases the plan; inspect before deciding what to do. `GET
+operations/{operation_id}` returns its original plan and a bounded page of committed results (`result_cursor`, `result_limit`, `has_more_results`, `next_result_cursor`);
+`GET operations?cursor=...` discovers the authenticated principal's operations
+in the tracker. Plan bodies may contain sensitive data and must not be logged.
+All operation access requires current write authorization and is bound to the
+principal and tracker. Operation records do not expire with ordinary seven-day
+idempotency receipts. Logical snapshot v1/v2 excludes these plans/results, the incremental analysis fences and `terminal_backup_revision/` scheduler watermarks; logical restore requires a fresh analysis checkpoint and never resumes an archived operation. Preserve operation custody through the existing Durable Object or an admitted provider-level recovery; see [operations](operations.md). Capability: `profile.durable_operations_v1`.

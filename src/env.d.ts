@@ -10,7 +10,6 @@ declare namespace Cloudflare {
 interface Env {
   /** Optional repository/path/tracker binding for the dashboard's generated state page. */
   STATE_PAGE?: string;
-  PORTFOLIO_ARCHIVE?: {source: 'dolt'; label: string; points: import('./dashboard/data').Snapshot[]};
   PORTFOLIO_TITLE?: string;
   /** Optional JSON overriding the health alert thresholds, e.g. {"error_rate":0.02}; see docs/operations.md. */
   HEALTH_THRESHOLDS?: string;

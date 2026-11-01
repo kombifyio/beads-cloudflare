@@ -72,14 +72,8 @@ export async function handlePortfolio(request: Request, env: Env, ctx: ApiContex
     if (url.pathname === '/portfolio/overview') {
       const snapshot = await collectPortfolio(catalog,read);
       const history = await historyFor(env,ctx.props,new Set(catalog.map(repo => repo.id)));
-      const archive = env.PORTFOLIO_ARCHIVE ? { source:'dolt', label:env.PORTFOLIO_ARCHIVE.label,
-        points:env.PORTFOLIO_ARCHIVE.points.map(point => {
-          const repositories = point.repositories.filter(repo => catalog.some(current => current.id === repo.id && current.tracker === repo.tracker));
-          return {...point,repositories,totals:totalsOf(repositories)};
-        }).filter(point => point.repositories.length > 0) } : undefined;
       return json({...snapshot,title:env.PORTFOLIO_TITLE || 'Beads portfolio',labels:portfolioLabels(env),history,
         viewer:{name:ctx.props.name,email:ctx.props.email},
-        ...(archive ? {archive} : {}),
         source:{authority:'cloudflare',partial:snapshot.repositories.some(repo => repo.error),historyStartedAt:history[0]?.generatedAt ?? null}});
     }
     if (url.pathname === '/portfolio/milestones') {

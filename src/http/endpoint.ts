@@ -21,7 +21,7 @@ const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,255}$/;
 type Route =
   | { kind: "health" }
   | { kind: "context" }
-  | { kind: "read"; op: ReadOp; id?: string; scope?: "import" }
+  | { kind: "read"; op: ReadOp; id?: string; scope?: "import" | "write" }
   | { kind: "write"; op: WriteOp; id?: string; large?: boolean; bodyless?: boolean; scope?: "import" };
 
 const CUSTOM_METHODS: Record<string, WriteOp> = {
@@ -44,6 +44,9 @@ export function route(method: string, path: string): Route | undefined {
     "ready:count": { GET: { kind: "read", op: "countReadyWork" } },
     issues: { GET: { kind: "read", op: "listIssues" }, POST: { kind: "write", op: "createIssue", large: true } },
     "issues:claimNext": { POST: { kind: "write", op: "claimNextIssue" } },
+    operations: { GET: { kind: "read", op: "listOperations", scope: "write" }, POST: { kind: "write", op: "createOperation", large: true } },
+    "issues:changes": { GET: { kind: "read", op: "changesIssues" } },
+    "issues:analysis": { GET: { kind: "read", op: "analyzeIssues" } },
     "issues:count": { GET: { kind: "read", op: "countIssues" } },
     "issues:query": { GET: { kind: "read", op: "queryIssues" } },
     "issues:batchCreate": { POST: { kind: "write", op: "batchCreateIssues", large: true } },
@@ -84,7 +87,15 @@ export function route(method: string, path: string): Route | undefined {
       return undefined;
     }
   };
-  let m = /^issues\/([^/]+)\/comments$/.exec(rest);
+  let m = (method === "POST" ? /^operations\/([^/]+)(:advance)$/ : /^operations\/([^/]+)$/).exec(rest);
+  if (m) {
+    const operationId = decode(m[1]!);
+    if (operationId === undefined) return undefined;
+    if (!m[2] && method === "GET") return { kind: "read", op: "inspectOperation", id: operationId, scope: "write" };
+    if (m[2] && method === "POST") return { kind: "write", op: "advanceOperation", id: operationId };
+    return undefined;
+  }
+  m = /^issues\/([^/]+)\/comments$/.exec(rest);
   if (m) return method === "POST" && decode(m[1]!) !== undefined ? { kind: "write", op: "addComment", id: decode(m[1]!) } : undefined;
   m = /^issues\/([^/]+)\/related$/.exec(rest);
   if (m) return method === "GET" && decode(m[1]!) !== undefined ? { kind: "read", op: "listRelatedIssues", id: decode(m[1]!) } : undefined;
@@ -196,6 +207,18 @@ const unlimitedRefused = () => invalid("limit", "unlimited reads are loopback-on
 function readCall(op: ReadOp, id: string | undefined, url: URL, base: Call): Call {
   const q = new Query(url.searchParams);
   switch (op) {
+    case "listOperations": { const cursor = q.str("cursor"); q.finish(); return { ...base, params: { cursor } }; }
+    case "inspectOperation": { const params = { result_cursor: q.int("result_cursor"), result_limit: q.int("result_limit") }; q.finish(); return { ...base, id, params }; }
+    case "changesIssues": {
+      const params = { since: q.int("since"), since_revision: q.int("since_revision"), cursor: q.str("cursor") };
+      q.finish();
+      return { ...base, params };
+    }
+    case "analyzeIssues": {
+      const params = { status: q.str("status"), ids: q.commaList("ids"), limit: q.int("limit"), cursor: q.str("cursor") };
+      q.finish();
+      return { ...base, params };
+    }
     case "listReadyWork":
       return { ...base, filter: readyFilter(q, "list") };
     case "countReadyWork":
@@ -323,7 +346,7 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
 
   // The import route is gated twice: `merge` mode is an ordinary write (beads:write); `replace` mode, which
   // rewrites history, also needs beads:import. The mode is in the body, so the second check follows the read.
-  const refusedScope = scopeRefusal(ctx, matched.kind === "write", matched.kind === "read" && matched.scope === "import");
+  const refusedScope = scopeRefusal(ctx, matched.kind === "write" || (matched.kind === "read" && matched.scope === "write"), matched.kind === "read" && matched.scope === "import");
   if (refusedScope) return refusedScope;
   const importScope = matched.kind === "write" && matched.scope === "import" ? scopeRefusal(ctx, true, true) : undefined;
   if (!trackerAllowed(ctx.props, tracker)) return respond(forbiddenTracker(tracker), requestId);

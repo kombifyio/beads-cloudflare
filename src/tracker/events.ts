@@ -11,8 +11,10 @@ type EventsPage = components["schemas"]["EventsPage"];
 export interface Ctx {
   sql: SqlStorage;
   tracker: string;
-  /** Verified principal (email). */
+  /** Verified display identity recorded in audit history. */
   actor: string;
+  /** Stable verified subject used for claim ownership; absent for internal system events. */
+  principal?: string;
   /** The actor the caller asserted, kept for provenance only. */
   clientActor?: string;
   /** The agent or session name from the X-Beads-Agent header: provenance only, never the principal. */

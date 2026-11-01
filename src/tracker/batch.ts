@@ -14,6 +14,7 @@ import { invalid, issueNotFound, refuse, Refusal } from "./problem";
 import type { Out, ProblemExtras } from "./problem";
 import { addComment, createIssue, idIsAddressable, parseVersionToken, updateIssue, patchMetadata } from "./issues";
 import { runeLength, isObject, safeObject, setOwn, type Json } from "./util";
+import { validateEvidence } from "./evidence";
 
 const MAX_ITEMS = 100;
 
@@ -280,6 +281,7 @@ export function applyBatch(ctx: Ctx, body: Json, candidates: string[][]): Out {
     }
     const row = loadIssue(ctx.sql, ctx.tracker, id)!;
     const merged = patchMetadata(safeObject(row.metadata), { set });
+    validateEvidence(merged, row.acceptance_criteria, `items[${index}].create.metadata_refs`);
     ctx.sql.exec(
       "UPDATE issues SET metadata = ?3, updated_at = ?4, version = version + 1 WHERE tracker = ?1 AND id = ?2",
       ctx.tracker, id, JSON.stringify(merged), ctx.now,

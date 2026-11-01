@@ -960,7 +960,7 @@ function foreignWorkspaceReason(dir) {
   return null;
 }
 
-const foreignWorkspaceFix = "to move its issues to the store follow \"Migrate from a Dolt store\" in the README, or add --replace-existing-workspace to move .beads aside to .beads.backup-<time> and start fresh";
+const foreignWorkspaceFix = "archive and verify its retained database/history privately before authorized retirement; import archived exports as described in the README, or use --replace-existing-workspace only after archival to move .beads aside to .beads.backup-<time>";
 
 /**
  * The self-test. options.bin names a bd to use instead of the one on PATH.
@@ -1131,7 +1131,7 @@ async function selfTest(report, { cwd, bin, store, dryRun = false, scratch = fal
   const base = process.env.BEADS_CLOUDFLARE_BASE ?? store ?? repo.base;
   const tracker = process.env.BEADS_CLOUDFLARE_TRACKER ?? repo.tracker;
   if (!base || trackerProblem(tracker)) { report.fail("repository", "store and tracker are not configured", `${NPX} join <store url> --tracker <id>`); return; }
-  if (found && foreignWorkspaceReason(found.dir)) { report.fail("repository", foreignWorkspaceReason(found.dir), "credentials is the auth-only command for an existing Dolt workspace"); return; }
+  if (found && foreignWorkspaceReason(found.dir)) { report.fail("repository", foreignWorkspaceReason(found.dir), "credentials authenticates without changing repository storage"); return; }
   if (dryRun) { report.would("check the first bd on PATH, resolve credentials, read tracker context and run bd --readonly ready --json; no tracker records are written"); return; }
   const installDir = defaultBinDir(process.platform, process.env, homedir());
   const bd = bin ?? findOnPath()[0];
@@ -1332,7 +1332,7 @@ export async function bootstrapCommand(flag) {
   const report = new Report(flag["dry-run"]);
   const found = findRepoConfig(process.cwd());
   if (!found) { report.fail("repository", "no existing .beads/cloudflare.json", `${NPX} join <store url>`); return report.finish("bootstrap"); }
-  if (foreignWorkspaceReason(found.dir)) { report.fail("repository", "bootstrap requires an existing Cloudflare workspace", "use credentials for authentication only; migrate Dolt separately"); return report.finish("bootstrap"); }
+  if (foreignWorkspaceReason(found.dir)) { report.fail("repository", "bootstrap requires an existing Cloudflare workspace", "use credentials for authentication only; archive and verify retained local history before authorized retirement"); return report.finish("bootstrap"); }
   if (flag["dry-run"]) { report.would("resolve the existing repository credential, install matching bd and read tracker context; preserve repository files"); return report.finish("bootstrap"); }
   const cfg = found.config;
   let credential = effectiveCredential({ repoDir: found.dir, base: cfg.base, tokenEnv: cfg.token_env });

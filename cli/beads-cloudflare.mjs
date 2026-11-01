@@ -22,7 +22,7 @@ Commands
   join <store url>    Use an existing store from the current directory: install bd, store the key,
                       write .beads/, run the self-test.
   bootstrap           Provision an existing clone's credentials and matching bd; preserve repository files.
-  credentials         Resolve credentials only, including for a Dolt workspace; --json is for custody callers.
+  credentials         Resolve credentials without changing storage; --json is for custody callers.
   doctor              Read-only tracker context, credential and binary readiness. --scratch opts into writes.
   uninstall           Remove the bd binary and the stored credentials from this machine. The store
                       and its data are never touched.

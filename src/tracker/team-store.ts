@@ -1,3 +1,6 @@
+import { advanceOperation, createOperation, inspectOperation, listOperations, operationChunk } from "./operations";
+import { changes, type ChangesParams } from "./changes";
+import { analysis, type AnalysisParams } from "./analysis";
 // One Durable Object per team. The Worker decides who may call; this object runs each mutation as
 // one synchronous transaction: invariant checks, the change, its events and the idempotency receipt.
 import { DurableObject } from "cloudflare:workers";
@@ -21,20 +24,21 @@ import { importRecords, projectIdOf } from "./import";
 import { exportDependencies, exportIssues } from "./export";
 import { compareAndSetMetadata, deleteIssues, sweepIssues } from "./maintenance";
 import { queryIssues } from "./query";
-import { isTrackerId, nowIso, safeJson, setOwn, type Json } from "./util";
+import { isObject, isTrackerId, nowIso, safeJson, setOwn, type Json } from "./util";
 import { advanceTrackerRevision, trackerRevision } from "./revision";
 import { contextFor } from "./context";
 import { HealthMeter, type HealthSample } from "./health";
+import { terminalBackupTrackers, TERMINAL_BACKUP_REVISION_PREFIX } from "./backup-lifecycle";
 
 export type WriteOp =
-  | "createIssue" | "updateIssue" | "closeIssue" | "reopenIssue" | "claimIssue" | "releaseIssue" | "claimNextIssue"
+  | "createOperation" | "advanceOperation" | "createIssue" | "updateIssue" | "closeIssue" | "reopenIssue" | "claimIssue" | "releaseIssue" | "claimNextIssue"
   | "heartbeatIssue" | "reclaimExpiredLeases"
   | "setConfig" | "setSetting" | "unsetSetting"
   | "batchCreateIssues" | "batchCloseIssues" | "applyBatch" | "deleteIssues" | "sweepIssues" | "compareAndSetMetadata" | "importRecords"
   | "addComment" | "addDependencies" | "removeDependency" | "rememberMemory" | "forgetMemory";
 
 export type ReadOp =
-  | "getIssue" | "listIssues" | "listReadyWork" | "countReadyWork" | "listMemories" | "getMemory" | "listEvents"
+  | "listOperations" | "inspectOperation" | "changesIssues" | "analyzeIssues" | "getIssue" | "listIssues" | "listReadyWork" | "countReadyWork" | "listMemories" | "getMemory" | "listEvents"
   | "getSetting" | "listSettings" | "exportSettings" | "getCustomStatuses" | "getCustomStatusesDetailed" | "getCustomTypes" | "getInfraTypes"
   | "getStats" | "countIssues" | "queryIssues" | "listDependencies" | "countDependencyEdges" | "listBlockingAnnotations"
   | "getDependencyTree" | "listDependencyCycles" | "listRelatedIssues" | "exportIssues" | "exportDependencies";
@@ -137,8 +141,16 @@ export class TeamStore extends DurableObject<Env> {
     const started = Date.now();
     this.meter.request();
     // Hashing is async in workerd, so id candidates are prepared before the synchronous transaction.
-    const candidates = await this.candidatesFor(op, call, now);
     try {
+      if (op === "advanceOperation" && call.idem) {
+        const replay = this.ctx.storage.transactionSync(() => this.replayReceipt(call, now));
+        if (replay) {
+          this.meter.write(Date.now() - started);
+          return replay;
+        }
+      }
+      const candidateCall = op === "advanceOperation" ? { ...call, body: operationChunk(this.sql, call.tracker, call.principal.sub, call.id ?? "", call.body?.expected_index) } : call;
+      const candidates = await this.candidatesFor(op === "advanceOperation" ? "applyBatch" : op, candidateCall, now);
       this.releaseLapsed(call.tracker);
       const out = this.ctx.storage.transactionSync(() => this.runWrite(op, call, now, candidates));
       this.meter.write(Date.now() - started);
@@ -230,6 +242,45 @@ export class TeamStore extends DurableObject<Env> {
     return [...out.values()].sort((a, b) => (a.tracker < b.tracker ? -1 : 1));
   }
 
+  /** Internal backup discovery includes history and identity after the last active record is deleted. */
+  backupTrackers(): string[] {
+    const trackers = new Set<string>();
+    for (const table of ["issues", "memories", "config", "events", "custom_statuses", "custom_types", "operations", "operation_chunks", "analysis_changes"]) {
+      for (const { tracker } of this.sql.exec<{ tracker: string }>(`SELECT DISTINCT tracker FROM ${table}`).toArray()) trackers.add(tracker);
+    }
+    for (const prefix of ["mutation_revision/", "project_id/"]) {
+      for (const { tracker } of this.sql.exec<{ tracker: string }>(
+        "SELECT substr(key, ?) AS tracker FROM meta WHERE key GLOB ?", prefix.length + 1, `${prefix}*`,
+      ).toArray()) trackers.add(tracker);
+    }
+    return [...trackers].sort();
+  }
+
+  /** Complete discovery stays available; acknowledged terminal fixtures leave the daily scan budget. */
+  backupCandidates(): string[] {
+    const terminal = terminalBackupTrackers(this.sql, Date.now());
+    const archived = new Map<string, string>(this.sql.exec<{ tracker: string; value: string }>(
+      "SELECT substr(key, ?) AS tracker, value FROM meta WHERE key GLOB ?",
+      TERMINAL_BACKUP_REVISION_PREFIX.length + 1, `${TERMINAL_BACKUP_REVISION_PREFIX}*`,
+    ).toArray().map(row => [row.tracker, row.value]));
+    return this.backupTrackers().filter(tracker => !terminal.has(tracker) || archived.get(tracker) !== String(trackerRevision(this.sql, tracker)));
+  }
+
+  /** Called only after an R2 manifest acknowledgement; concurrent changes or new live keys prevent retirement. */
+  acknowledgeTerminalBackups(archives: { tracker: string; revision: number }[]): number {
+    return this.ctx.storage.transactionSync(() => {
+      const terminal = terminalBackupTrackers(this.sql, Date.now());
+      let acknowledged = 0;
+      for (const archive of archives) {
+        if (!terminal.has(archive.tracker) || trackerRevision(this.sql, archive.tracker) !== archive.revision) continue;
+        this.sql.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          `${TERMINAL_BACKUP_REVISION_PREFIX}${archive.tracker}`, String(archive.revision));
+        acknowledged++;
+      }
+      return acknowledged;
+    });
+  }
+
   /**
    * Hashing is async in workerd, so the id candidates of every create the request carries are prepared
    * before the synchronous transaction: one list per item (a single create is item 0).
@@ -254,6 +305,10 @@ export class TeamStore extends DurableObject<Env> {
     const { sql } = this;
     const { tracker } = call;
     switch (op) {
+      case "listOperations": return listOperations(sql, tracker, call.principal.sub, (call.params as { cursor?: string }).cursor);
+      case "inspectOperation": return inspectOperation(sql, tracker, call.principal.sub, call.id ?? "", call.params as { result_cursor?: number; result_limit?: number });
+      case "changesIssues": return changes(sql, tracker, call.params as ChangesParams);
+      case "analyzeIssues": return analysis(sql, tracker, call.params as AnalysisParams);
       case "getIssue": return getIssue(sql, tracker, call.id ?? "", call.get ?? {});
       case "listIssues": return listIssues(sql, tracker, call.list ?? {});
       case "listReadyWork": return { status: 200, body: listReady(sql, tracker, call.filter ?? {}, nowIso()) };
@@ -283,7 +338,7 @@ export class TeamStore extends DurableObject<Env> {
     }
   }
 
-  private runWrite(op: WriteOp, call: Call, now: string, candidates: string[][]): Out {
+  private replayReceipt(call: Call, now: string): Out | undefined {
     const { principal, idem } = call;
     if (idem) {
       // An expired receipt must not replay: drop it, inside this transaction, before the lookup.
@@ -309,10 +364,23 @@ export class TeamStore extends DurableObject<Env> {
       }
     }
 
-    const ctx: Ctx = { sql: this.sql, tracker: call.tracker, actor: principal.email, agent: call.agent, preserveProvenance: call.preserveProvenance, now };
+    return undefined;
+  }
+
+  private runWrite(op: WriteOp, call: Call, now: string, candidates: string[][]): Out {
+    const { principal, idem } = call;
+    const replay = this.replayReceipt(call, now);
+    if (replay) return replay;
+
+    const startHead = this.sql.exec<{ head: number }>("SELECT COALESCE(MAX(seq), 0) AS head FROM events WHERE tracker = ?", call.tracker).one().head;
+    const ctx: Ctx = { sql: this.sql, tracker: call.tracker, actor: principal.email, principal: principal.sub, agent: call.agent, preserveProvenance: call.preserveProvenance, now };
     const out = this.dispatch(op, ctx, call, candidates);
     if (out.status < 400) {
       const revision = advanceTrackerRevision(this.sql, call.tracker);
+      const endHead = this.sql.exec<{ head: number }>("SELECT COALESCE(MAX(seq), 0) AS head FROM events WHERE tracker = ?", call.tracker).one().head;
+      const safe = ["createIssue", "updateIssue", "closeIssue", "reopenIssue", "claimIssue", "releaseIssue", "claimNextIssue", "heartbeatIssue", "reclaimExpiredLeases", "batchCreateIssues", "batchCloseIssues", "deleteIssues", "sweepIssues", "compareAndSetMetadata", "addComment", "addDependencies", "removeDependency"];
+      const batchSafe = op === "applyBatch" && Array.isArray(call.body?.items) && call.body.items.every(item => isObject(item) && typeof item.kind === "string" && !["x_set_config", "x_unset_config"].includes(item.kind));
+      this.sql.exec("INSERT INTO analysis_changes (tracker, revision, start_head, end_head, full_refresh) VALUES (?, ?, ?, ?, ?)", call.tracker, revision, startHead, endHead, safe.includes(op) || batchSafe ? 0 : 1);
       if (op === "importRecords" && call.body?.restore_guard !== undefined) {
         out.body = { ...(out.body as Json), x_mutation_revision: revision };
       }
@@ -332,6 +400,8 @@ export class TeamStore extends DurableObject<Env> {
     const body = call.body ?? {};
     const id = call.id ?? "";
     switch (op) {
+      case "createOperation": return createOperation(ctx, call.principal.sub, body);
+      case "advanceOperation": return advanceOperation(ctx, call.principal.sub, id, body, candidates);
       case "createIssue": return createIssue(ctx, body, candidates[0] ?? []);
       case "updateIssue": return updateIssue(ctx, id, body, { ifMatch: call.ifMatch });
       case "closeIssue": return closeIssue(ctx, id, body);

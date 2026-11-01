@@ -3,6 +3,7 @@ import { recordEvent, type Ctx } from "./events";
 import { all, type IssueRow } from "./model";
 import { refuse } from "./problem";
 import { advanceTrackerRevision } from "./revision";
+import { isObject, safeJson } from "./util";
 
 /** How long a claim lives when the caller names no `x_lease_seconds`. Holder writes and heartbeats push it out again. */
 export const DEFAULT_LEASE_SECONDS = 2 * 3600;
@@ -50,21 +51,46 @@ export const leaseExpired = (row: IssueRow, now: string) =>
 export const liveClaim = (row: IssueRow, now: string) =>
   row.status === "in_progress" && row.assignee !== "" && row.lease_expires_at !== null && row.lease_expires_at > now;
 
-/**
- * The claim is this caller's: the same worker name and the same verified principal. A row that records no principal
- * is either an assignment by name with no lease (the named worker's, whoever's credential it uses) or a lease from
- * before holders were recorded or restored by an import, which only the principal named as its assignee can act on.
- */
+/** New claims use the subject; audit actors and default worker names remain readable. */
+export const principalOf = (ctx: Ctx): string => ctx.principal ?? ctx.actor;
+
+/** Legacy display identities are admitted only when their original key is unambiguous. */
+export function samePrincipal(ctx: Ctx, row: IssueRow): boolean {
+  const holder = claimHolder(row);
+  if (holder === principalOf(ctx)) return true;
+  if (holder !== ctx.actor) return false;
+  if (!ctx.principal?.startsWith("key:")) return true;
+  if (!holder.startsWith("agent:")) return false;
+  // The latest custody transition must prove this exact lease generation. Imports
+  // cannot establish when a restored display-only holder acquired its credential.
+  const claimed = all<{ ts: string; kind: string; issue: string | null }>(ctx.sql,
+    `SELECT ts, kind, issue FROM events WHERE tracker = ? AND issue_id = ?
+      AND kind NOT IN ('updated', 'commented', 'dependency_added', 'dependency_removed', 'lease_renewed')
+      ORDER BY seq DESC LIMIT 1`,
+    ctx.tracker, row.id)[0];
+  if (!claimed || !['claimed', 'reopened'].includes(claimed.kind)) return false;
+  const snapshot = safeJson(claimed.issue ?? '', null);
+  if (!isObject(snapshot) || snapshot.status !== 'in_progress' || !isObject(snapshot.x_claim)
+      || snapshot.x_claim.verified_principal !== holder || snapshot.x_claim.assignee !== row.assignee
+      || snapshot.x_claim.fencing_token !== row.fencing) return false;
+  const candidates = all<{ id: string }>(ctx.sql,
+    `SELECT id FROM api_keys WHERE label = ?1 AND created_at <= ?2
+      AND (expires_at IS NULL OR expires_at > ?2) AND (revoked_at IS NULL OR revoked_at > ?2)
+      AND created_by NOT LIKE 'github-exchange:%'`, holder.slice("agent:".length), claimed.ts);
+  return candidates.length === 1 && `key:${candidates[0]?.id}` === ctx.principal;
+}
+
+/** The freely chosen worker name never substitutes for verified ownership. */
 export const isHolder = (ctx: Ctx, row: IssueRow) => {
-  if (row.claimed_by !== "") return row.claimed_by === ctx.actor && row.assignee === workerOf(ctx);
-  return row.lease_expires_at === null ? row.assignee === workerOf(ctx) : row.assignee === ctx.actor;
+  if (row.claimed_by !== "") return samePrincipal(ctx, row) && row.assignee === workerOf(ctx);
+  return row.lease_expires_at === null ? row.assignee === workerOf(ctx) : samePrincipal(ctx, row);
 };
 
 /** The 409 that tells a caller who holds the row, until when and what to do about it. */
 export function heldByOther(ctx: Ctx, row: IssueRow, via = "change") {
-  const samePrincipal = claimHolder(row) === ctx.actor;
+  const sameOwner = samePrincipal(ctx, row);
   const until = row.lease_expires_at ?? "an unknown time";
-  const hint = samePrincipal
+  const hint = sameOwner
     ? `Your credential holds it as worker "${row.assignee}": act with that worker name (--actor or BEADS_ACTOR), or wait for the lease to lapse.`
     : "Wait for the lease to lapse or ask the holder to release it; a deliberate takeover is `release` with `force`.";
   return refuse("already_claimed", `this issue is claimed by "${row.assignee}" until ${until}, so you cannot ${via} it. ${hint}`, {
@@ -73,7 +99,7 @@ export function heldByOther(ctx: Ctx, row: IssueRow, via = "change") {
     // The holder is named separately: the assignee is the name work is allocated to, which the caller
     // chooses, so it does not by itself identify who may act on the claim.
     x_claimed_by: claimHolder(row),
-    x_same_principal: samePrincipal,
+    x_same_principal: sameOwner,
     x_lease_expires_at: row.lease_expires_at,
     issue_status: row.status,
   });

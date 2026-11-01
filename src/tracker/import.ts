@@ -1,3 +1,4 @@
+import { validateEvidence } from "./evidence";
 // importRecords: a faithful, idempotent bulk upsert of whole issue records.
 //
 // This is how a tracker is moved here from another store without losing its history. It is a profile
@@ -91,6 +92,7 @@ function parseRecord(ctx: Ctx, raw: unknown, i: number, vocab: ReturnType<typeof
   const createdAt = time(raw.created_at, `${at}.created_at`, true)!;
   const metadata = raw.metadata === undefined || raw.metadata === null ? {} : raw.metadata;
   if (!isObject(metadata)) throw invalid(`${at}.metadata`, "`metadata` must be a JSON object");
+  validateEvidence(metadata, text(raw.acceptance_criteria, `${at}.acceptance_criteria`), `${at}.metadata.beads_evidence`);
   for (const flag of ["ephemeral", "no_history", "pinned"]) {
     if (raw[flag] !== undefined && typeof raw[flag] !== "boolean") throw invalid(`${at}.${flag}`, `\`${flag}\` must be a boolean`);
   }

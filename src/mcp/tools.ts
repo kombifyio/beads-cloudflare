@@ -86,6 +86,7 @@ export function resultOf(out: Out): CallToolResult {
 }
 
 export const WRITE_TOOLS = new Set([
+  "bead_operation_create", "bead_operation_advance",
   "bead_create", "bead_update", "bead_close", "bead_reopen", "bead_claim", "bead_claim_next", "bead_release",
   "bead_comment_add", "bead_dependency_add", "bead_dependency_remove", "memory_put", "memory_forget",
 ]);
@@ -102,6 +103,7 @@ export function buildServer(deps: ToolDeps): McpServer {
       { description, inputSchema: z.object({ tracker, ...shape }), annotations: { readOnlyHint: true } },
       async (args) => {
         const a = args as z.infer<z.ZodObject<S>> & { tracker: string };
+        if ((op === "inspectOperation" || op === "listOperations") && !deps.canWrite) return SCOPE_ERROR;
         if (!trackerAllowed(deps.principal, a.tracker)) return resultOf(forbiddenTracker(a.tracker));
         if (op === "context") return resultOf({ status: 200, body: { ...await deps.store.contextOf(a.tracker), x_identity: inspectIdentity(deps.principal, deps.agent) } });
         return resultOf(await deps.store.read(op, { tracker: a.tracker, principal: deps.principal, agent: deps.agent, ...map(a) }));
@@ -128,6 +130,15 @@ export function buildServer(deps: ToolDeps): McpServer {
   };
 
   read("tracker_context", "Describe a tracker: API version, capabilities and extensions.", {}, "context", () => ({}));
+
+  read("bead_operation_list", "List your durable operations for this tracker.", { cursor: z.string().optional() }, "listOperations", a => ({ params: a }));
+  read("bead_operation_inspect", "Inspect a principal-owned durable batch operation and its committed results.", { operation_id: z.string().min(1).max(200), result_cursor: z.number().int().min(0).optional(), result_limit: z.number().int().min(1).max(100).optional() }, "inspectOperation", a => ({ id: a.operation_id, params: { result_cursor: a.result_cursor, result_limit: a.result_limit } }));
+  write("bead_operation_create", "Persist an immutable resumable batch plan at the current revision.", { operation_id: z.string().min(1).max(200), expected_revision: z.number().int().min(0), chunks: z.array(z.record(z.string(), z.unknown())).min(1).max(100) }, "createOperation", a => ({ body: a }));
+  write("bead_operation_advance", "Atomically apply the next persisted batch chunk; inspect after uncertain transport.", { operation_id: z.string().min(1).max(200), expected_index: z.number().int().min(0) }, "advanceOperation", a => ({ id: a.operation_id, body: { expected_index: a.expected_index } }));
+
+  read("bead_changes", "Read incremental changes from an analysis checkpoint, or require full refresh.", { since: z.number().int().min(0), since_revision: z.number().int().min(0), cursor: z.string().optional() }, "changesIssues", a => ({ params: a }));
+
+  read("bead_analysis", "Read a revision-fenced compact tracker snapshot.", { status: z.string().optional(), ids: z.array(z.string()).max(100).optional(), limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional() }, "analyzeIssues", a => ({ params: a }));
 
   read("bead_get", "Get one bead with labels, dependencies, comment count and its `revision` (use as expected_version).", {
     id,

@@ -138,11 +138,12 @@ uncertain outcome before starting another logical operation. HTTP context
 `x_identity` reports the credential principal separately from the native actor;
 issue `x_claim` reports claim identity, expiry and fencing.
 
-Leftovers of a former Dolt workspace that matter: a `.beads/dolt` directory with no
-`.beads/.local_version` makes bd refuse ("legacy Dolt workspace"); delete it or
-write the current version into `.local_version`. A non-empty `.beads/issues.jsonl`
-is auto-imported by the first write command against an empty tracker (once, then
-stamped). No `config.yaml` is needed.
+A former `.beads/dolt` directory can make upstream bd refuse a legacy workspace.
+Archive its retained database and history privately, verify readback and native
+readability, then remove the authorized retired storage. Do not bypass that
+refusal with `.local_version`. The governed bootstrap disables upstream automatic
+JSONL import/export and local commits in `config.yaml`; historical exports never
+silently populate an empty Cloudflare tracker.
 
 ## How it reaches the store
 

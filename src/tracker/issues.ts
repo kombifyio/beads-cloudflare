@@ -1,3 +1,4 @@
+import { validateEvidence } from "./evidence";
 // Issue operations: create, update, get, list and comments.
 import type { components } from "../generated/openapi.v0";
 import { issuePrefix } from "./config";
@@ -17,7 +18,7 @@ import {
   wrongType,
 } from "./body";
 import { insertEdge, recordEdgeAdded, recordEdgeRemoved, checkEdgeType, type EdgeInput } from "./edges";
-import { DEFAULT_LEASE_SECONDS, guardClaim, isHolder, leaseExpired, liveClaim, renewedLease, staleClaim, workerOf } from "./claims";
+import { principalOf, DEFAULT_LEASE_SECONDS, guardClaim, isHolder, leaseExpired, liveClaim, renewedLease, staleClaim, workerOf } from "./claims";
 import { parseExtra, X_EXTRA } from "./extra";
 import { recordEvent, type Ctx } from "./events";
 import {
@@ -161,6 +162,7 @@ export function createIssue(ctx: Ctx, body: Json, candidates: string[]): Out {
   const dueAt = optTime(body, "due_at");
   const deferUntil = optTime(body, "defer_until");
   const metadata = metadataValue(body.metadata, "metadata");
+  validateEvidence(metadata, acceptance, "metadata.beads_evidence");
   const inherit = optBool(body, "inherit_labels_from_parent") ?? false;
   const forcePrefix = optBool(body, "force_id_prefix") ?? false;
   // Migration-only escape hatch, shaped like force_id_prefix. A mirrored
@@ -492,6 +494,7 @@ export function updateIssue(ctx: Ctx, id: string, body: Json, guards: UpdateGuar
     const merged = JSON.stringify(patchMetadata(safeObject(row.metadata), patch.metadata));
     set("metadata", merged);
   }
+  if (next.metadata !== undefined) validateEvidence(safeObject(String(next.metadata)), String(next.acceptance_criteria ?? row.acceptance_criteria), "patch.metadata.beads_evidence");
   if (patch[X_EXTRA] !== undefined) {
     const edit = parseExtra(patch[X_EXTRA], `patch.${X_EXTRA}`, true);
     const current = safeObject(row.extra);
@@ -538,7 +541,7 @@ export function updateIssue(ctx: Ctx, id: string, body: Json, guards: UpdateGuar
   }
   if (claiming) {
     next.assignee = claimant;
-    next.claimed_by = ctx.actor;
+    next.claimed_by = principalOf(ctx);
     next.lease_expires_at = new Date(Date.parse(ctx.now) + DEFAULT_LEASE_SECONDS * 1000).toISOString();
     next.heartbeat_at = ctx.now;
     next.fencing = row.fencing + Math.max(bump, 1);

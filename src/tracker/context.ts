@@ -51,6 +51,10 @@ const OPERATION_TOKENS = [
 // Behavior tokens: `project.enforce` is upstream's; the `profile.*` ones declare this profile's extensions.
 const BEHAVIOR_TOKENS = [
   "profile.actionable_work",
+  "profile.analysis_v1",
+  "profile.changes_v1",
+  "profile.durable_operations_v1",
+  "profile.evidence_v1",
   "profile.apply_batch_extensions",
   "profile.batch_close_fencing",
   "profile.batch_comment_id",

@@ -19,7 +19,7 @@ It deploys the store into your account, creates an agent key, installs the match
 | `setup` | First time: deploy the store, create the first agent key, then do what `join` does here. |
 | `join <store url>` | Another machine or repository: get a key, install `bd`, write `.beads/`, run the self-test. |
 | `bootstrap` | Existing clone: acquire credentials, install matching bd, check readiness; preserve repository files. |
-| `credentials` | Acquire credentials only; also works while a repository still uses Dolt. |
+| `credentials` | Acquire credentials without changing repository storage. |
 | `doctor` | Read-only tracker context and binary readiness. `--scratch` explicitly exercises scratch writes. |
 | `uninstall` | Remove the `bd` binary, and with `--store <url>` or `--all` the stored credentials. Never touches the store. |
 
@@ -68,7 +68,7 @@ steps:
   - run: bd ready
 ```
 
-For a Dolt migration or parallel phase, `credentials --base <origin> --tracker <id> --github-repository <owner/repo>` authenticates without changing the backend. `credentials --json` returns `{token, expires_at}` for a process capturing it into custody; it is secret material and never belongs in logs, transcripts or Git. `doctor --scratch` needs a separate key allowed on scratch trackers; a repository-scoped key intentionally cannot use it. Policy deployment: [SETUP.md](SETUP.md#portable-github-authorization).
+For authentication without changing repository files, `credentials --base <origin> --tracker <id> --github-repository <owner/repo>` authenticates without changing the backend. `credentials --json` returns `{token, expires_at}` for a process capturing it into custody; it is secret material and never belongs in logs, transcripts or Git. `doctor --scratch` needs a separate key allowed on scratch trackers; a repository-scoped key intentionally cannot use it. Policy deployment: [SETUP.md](SETUP.md#portable-github-authorization).
 
 ## What this is
 
@@ -175,7 +175,9 @@ bash scripts/build-bd.sh v1.3.1 ./dist/bd      # pass the result to join with --
 
 The `bd/` module is importable on its own as `github.com/kombifyio/beads-cloudflare/bd`; its Go version tags are `bd/vX.Y.Z`, and every release carries both `vX.Y.Z` and `bd/vX.Y.Z` on the same commit.
 
-## Migrate from a Dolt store
+## Import archived issue exports
+
+Retired local databases and history belong in a private, checksum-verified archive. Verify extracted data and native readability before removing an original store. Normal setup and operation require only the Cloudflare client; there is no parallel comparison phase or local database fallback. Import a previously captured issue export only within an explicitly authorized tracker migration.
 
 `POST /t/{tracker}/v0/beads/issues:import` takes records with history intact (author, timestamps, leases, comments, edges) and needs a key with `beads:import` (`node scripts/keys.mjs create migrate --import`). `replace` mode replaces the supplied records and deletes nothing else; `merge` follows upstream's `ImportBatch` and works with plain `beads:write`. `issues:export` and `dependencies:export` read a tracker back page by page for verification; `GET /admin/trackers` shows issue counts. Shapes and modes: [`docs/profile.md`](docs/profile.md).
 
