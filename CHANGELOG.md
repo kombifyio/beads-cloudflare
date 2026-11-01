@@ -7,6 +7,10 @@ versions may break). The store, `bd` and the setup tool carry one version, the `
 
 ## Unreleased
 
+## [0.2.15](https://github.com/kombifyio/beads-cloudflare/releases/tag/v0.2.15) (2026-11-01)
+
+### Features
+
 - Store health monitoring: `GET /admin/health`, hourly health samples and threshold alerts.
 - Claim lock: a status of `in_progress` is a claim held by the principal and the worker name, the holder's writes renew the 2-hour lease, a lapsed lease releases itself with a `lease_expired` event, and a one-time migration releases locks that predate real claims (assignee, lease and holder only; status and content untouched).
 

@@ -27,6 +27,9 @@ Every command supports `--dry-run`. `bd` installs to `~/.local/bin` (`%LOCALAPPD
 
 ## Automatic access from a fresh clone
 
+For recurring analysis, incremental reads and recoverable bulk updates, follow
+[the operating workflow](docs/operations.md#recurring-analysis-and-updates).
+
 An operator authorizes GitHub repositories for specific trackers; developers reuse the GitHub identity they already use to clone and publish, and CI uses a GitHub Actions OIDC identity. Nobody receives an admin token or copies an agent key. The operator sets the Worker's non-secret `GITHUB_REPOSITORIES` binding:
 
 ```json

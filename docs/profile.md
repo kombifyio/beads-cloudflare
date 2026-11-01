@@ -567,6 +567,9 @@ and re-read it before work. This projection does not reserve work.
 
 ### Compact analysis and incremental changes
 
+For the recommended client workflow, checkpoint lifecycle and interrupted-update
+recovery, see [Recurring analysis and updates](operations.md#recurring-analysis-and-updates).
+
 `GET /t/{tracker}/v0/beads/issues:analysis` returns a revision-fenced compact
 projection, not an interchange format. Optional `status`, repeatable or
 comma-separated `ids` (at most 100), `limit` (1–200, default 100), and `cursor`

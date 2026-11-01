@@ -2,6 +2,71 @@
 
 Use the store's authenticated API and scoped credentials. A tracker is one logical namespace inside the team's SQLite Durable Object, which also holds API-key digests and idempotency receipts; the OAuth provider uses a separate Workers KV namespace. Record the deployed source/version, Worker name, account, Durable Object class/migration history, team name, KV namespace, repository policy and non-secret origin. Keep Worker secrets in the operator's secure custody and never copy credentials into an archive, command argument, issue, chat or build log.
 
+## Recurring analysis and updates
+
+Start with authenticated `context` and check the capabilities you intend to use.
+Do not assume that every deployed store supports the newest profile. The HTTP
+routes below are relative to `/t/{tracker}/v0/beads/`; the MCP tools use the same
+authorization and domain operations. API details and limits are in
+[the profile](profile.md#compact-analysis-and-incremental-changes).
+
+| Task | HTTP | MCP |
+| --- | --- | --- |
+| Compact inventory | `GET issues:analysis?limit=200` | `bead_analysis` |
+| Incremental inventory | `GET issues:changes?since=<head>&since_revision=<revision>` | `bead_changes` |
+| Discover an interrupted plan | `GET operations` | `bead_operation_list` |
+| Read a plan and committed results | `GET operations/{id}` | `bead_operation_inspect` |
+| Register an immutable plan | `POST operations` | `bead_operation_create` |
+| Apply only its next chunk | `POST operations/{id}:advance` | `bead_operation_advance` |
+
+1. Read every analysis page with its returned cursor. Retain tracker, project,
+   authenticated principal, revision, event head and complete rows in a
+   private checkpoint. A 409 means the observation changed: discard the partial
+   observation and restart, retaining the last complete checkpoint. Separate
+   trackers have separate revisions; their combined report is not a transaction.
+2. Use an unfiltered, complete tracker checkpoint for delta materialization;
+   changes are tracker-wide and carry no status/ID filter. Apply selection
+   filters to the materialized view afterwards. A filtered analysis alone is
+   not a complete delta baseline. On the next run, request changes from that
+   complete checkpoint. Keep both original
+   `since` parameters on continuation pages, apply changed rows and tombstones,
+   then publish the new checkpoint atomically. `full_refresh_required` means
+   obtain a complete analysis again; never fill a gap with stale rows. Recheck
+   current authorization before reusing cached data.
+3. Fetch the full issue and dependency details needed for the work being reviewed.
+   Compact rows omit timestamps, labels, descriptions, comments, dependencies and
+   full acceptance text, and may truncate titles. Fence additional reads against
+   the tracker revision before reusing them. A compact listing is not an audit.
+   A prerequisite's status can change a dependent's derived blocked state without
+   changing that dependent's row revision; refresh that state or exclude it from
+   a cache intended only for reports. Evaluate lease expiry at the current time.
+4. Compose only verified, authorized mutations with their existing preconditions.
+   For several chunks, generate and retain an operation ID before registering
+   the plan. Registration returns its immutable hash and expected progress.
+   Persist the acknowledged identity before advancing. Each successful advance
+   commits the chunk's effects, result and next position atomically.
+5. After a timeout or process interruption, inspect the same operation, including
+   every result page. Discover it through the operation list if the local handle
+   was lost. Verify the plan identity and committed results, then advance only
+   the reported next chunk. Never repeat a committed chunk or recreate an
+   uncertain plan. A revision conflict requires inspection and a new plan for
+   remaining work; it never authorizes automatic rebasing. Operation access
+   requires current write scope and the original principal/tracker binding.
+
+Record actual acceptance results in the validated `beads_evidence` metadata member.
+Its criterion digest is SHA-256 of the exact UTF-8 acceptance text, without
+normalization; include source identity, environment, run and observation time.
+Changed criteria make historical evidence stale. A recorded pass is a claim to
+review, not an automatic issue close or proof of deployment.
+
+Keep detail caches outside publicly served paths, restrict their permissions and
+persist them across disposable jobs. A corrupt cache may be rebuilt from a full
+authenticated remote read; failed reads must not replace the last good report.
+Measure initial population, unchanged deltas and changed deltas separately: the
+first compact-plus-detail read can cost more than a full export. Record calls,
+payload bytes and elapsed time alongside revision and membership checks, and do
+not infer semantic coverage from transport speed.
+
 ## Logical backup
 
 Stop agents, imports, CI writers and maintenance for the source tracker; `--quiesced` records that assertion and stops nothing. Provide `BEADS_CLOUDFLARE_BASE` and `BEADS_SNAPSHOT_TOKEN` through secure environment custody; the token needs `beads:read`, `beads:write` and `beads:import`, restricted to the admitted source/destination trackers with a finite expiry. The tool needs no admin token or Cloudflare credentials.

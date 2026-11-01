@@ -16,6 +16,12 @@ npx --yes github:kombifyio/beads-cloudflare bootstrap             # an existing 
 beads-cloudflare: ready. Use bd as usual.
 ```
 
+After readiness, agents running recurring analysis or bulk updates should follow
+[the operating workflow](docs/operations.md#recurring-analysis-and-updates): compact
+inventory, complete checkpoints, required detail reads and inspected recovery.
+These advanced HTTP/MCP capabilities are discovered through `context`; they are
+not additional `bd` subcommands.
+
 Setup stores the admin token and agent key in owner-only user configuration files and prints their locations,
 never their values. Keep those files outside Git and transcripts. `credentials --json` is the explicit exception
 for a process that captures a credential directly into custody; do not use it for a visible readiness check.
