@@ -1,6 +1,6 @@
 {
   "name": "beads-cloudflare",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "description": "A shared Beads tracker in a Cloudflare Worker you own: one store for every agent, machine and CI job, used through the ordinary bd command.",
   "keywords": [
     "beads",

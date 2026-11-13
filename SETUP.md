@@ -37,7 +37,7 @@ Without a terminal nothing is asked: pass the agent key with `--token-file <file
 | `repository files` / `repository` | `.beads` here is a Beads workspace that does not use this store. To keep its issues: `migrate <store url>`. To start empty: `join <store url> --replace-existing-workspace` (moves `.beads` aside first). |
 | `export` / `import` / `compare` | `migrate` keeps the export in `.beads.backup-<time>/`; follow the fix line, then run the printed `bd import` command. |
 | `tracker id` | Pass `--tracker <id>` (lowercase letters, digits, single dashes, at most 40). |
-| `store reachable` | Check the store address and the network. |
+| `store reachable` | Check the store address. In a cloud sandbox whose network policy refuses the store, do not ask for a policy change: use the store's MCP tools (`beads_*`) if this session has them; otherwise ask the person once to add `https://<store>/mcp` as a remote MCP connector of the agent product (named **cf-beads**), which does not go through the sandbox network. |
 | `admin token` | Run `invite`/`keys` on the machine that ran `init`, or set `BEADS_ADMIN_TOKEN` and pass `--store <url>`. |
 | `GitHub policy` | Supply `--github-policy <JSON file>` holding a repository-to-tracker object of at most 5120 bytes. |
 | `bd tracker read` | Fix the read or compatibility error it names, then run `npx --yes beads-cloudflare doctor`. |

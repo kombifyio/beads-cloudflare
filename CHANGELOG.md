@@ -9,8 +9,15 @@ them under `## X.Y.Z (YYYY-MM-DD)`.
 
 ## Unreleased
 
+## 0.2.18 (2026-11-13)
+
 ### Added
 
+- README section "Ways to reach a store": which route fits a developer machine, CI, a container, a cloud agent whose
+  sandbox cannot reach the store (the store as a remote MCP connector, named `cf-beads`, which needs no sandbox
+  network exception) and any Streamable HTTP MCP client. `bd` stays the preferred route for agents.
+- `join` and `bootstrap` behind an HTTPS proxy: when the store is unreachable, the fix line points at the remote MCP
+  connector instead of a network policy change.
 - Setup tool commands: `init` (the same as `setup`), `migrate <store url>` (moves an existing Beads workspace into a
   tracker: export, back up `.beads`, join, import, compare counts), `invite` (a key and the command for a teammate),
   `keys create|list|revoke`, `agents` (instructions and the MCP server for Claude Code and Codex), `mcp` (a stdio MCP

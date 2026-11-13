@@ -1451,7 +1451,7 @@ export async function joinCommand(flag, positional, { report: shared, token: han
 
   const reach = await request("GET", `${base}/healthz`, { timeoutMs: 20000 });
   if (reach.status !== 200) {
-    report.fail("store reachable", `${base}/healthz answered ${reach.status ? `HTTP ${reach.status}` : reach.error}`, "check the address and the network; the address is the one setup printed");
+    report.fail("store reachable", `${base}/healthz answered ${reach.status ? `HTTP ${reach.status}` : reach.error}`, process.env.HTTPS_PROXY || process.env.https_proxy ? "check the address; in a sandbox whose network policy refuses the store, use the store as a remote MCP connector (https://<store>/mcp) instead of changing the policy (README: Ways to reach a store)" : "check the address and the network; the address is the one setup printed");
     return done();
   }
   report.ok("store reachable", base);

@@ -68,6 +68,22 @@ Without a terminal, save the key to a file and add `--token-file <file>` (`-` re
 
 A repository that is already joined only needs `npx beads-cloudflare bootstrap` in each new clone: it keeps the committed `.beads` files, installs the matching `bd` and checks access.
 
+## Ways to reach a store
+
+A person or agent uses the first route that works where it runs. All of them reach the same tracker and the same checks. `bd` is the preferred route for agents: it is the ordinary Beads CLI, prints `--json`, composes with pipes and costs no tool definitions in the agent's context. MCP is for where `bd` cannot run or cannot reach the store. Joining a store needs only Node and this package; the Cloudflare CLI is needed only by whoever creates or updates the store.
+
+| Where the work runs | Route | One-time setup |
+|---|---|---|
+| A developer machine | `bd` (and `npx beads-cloudflare mcp` for the agent on it) | `join` with a key, or a GitHub login with `--trust-store` |
+| CI | `bd` | an agent key in the job's secrets, or the job's GitHub Actions OIDC identity ([GitHub exchange](#optional-github-exchange)) |
+| A container or cloud sandbox that can reach the store | `bd` | `BEADS_CLOUDFLARE_BASE` and `BEADS_CLOUDFLARE_TOKEN`, then `bootstrap` ([below](#containers-ci-and-cloud-agent-sandboxes)) |
+| A cloud agent whose sandbox cannot reach the store | the store as a **remote MCP connector** of the agent product | the person adds `https://<your store>/mcp` once to their account, with [browser sign-in](#optional-browser-sign-in) |
+| Any MCP client that speaks Streamable HTTP | `https://<your store>/mcp` | an agent key as bearer token, or browser sign-in |
+
+The connector route needs no network exception: a hosted agent product calls a remote MCP server from its own servers, not from the sandbox, so the sandbox's egress policy does not apply. Name the connector after the tool: **cf-beads**. Its tools (`beads_ready`, `beads_show`, `beads_list`, `beads_search`, `beads_create`, `beads_update`, `beads_comment`, `beads_close`, `beads_block`) read every write back before they report success.
+
+An agent should not ask a person to allowlist the store's address in a sandbox policy. When `bd` cannot reach the store from a sandbox, it uses the connector tools if they are present, and otherwise asks the person once to add the connector.
+
 ## Coding agents
 
 `init` and `join` ask whether to set up agents (or take `--agents claude,codex`, `--agents none`); `npx beads-cloudflare agents claude,codex` does it later. It adds a short block between `<!-- beads-cloudflare:start -->` markers to `CLAUDE.md` and `AGENTS.md` (the rest of the file is kept, a second run changes nothing) and an MCP server entry:
@@ -104,7 +120,7 @@ bd ready
 
 - **Codex cloud.** Put both variables in the environment and this in the setup script. If the key is only available as a secret during setup, store it for later commands instead: `printenv BEADS_CLOUDFLARE_TOKEN | npx --yes beads-cloudflare@<version> join "$BEADS_CLOUDFLARE_BASE" --token-file - --agents none`. The setup script runs when the container is built and its result is cached, so `bd` is not downloaded again for each task.
 - **Claude Code in the cloud.** Set both variables in the cloud environment's settings and run `npx --yes beads-cloudflare@<version> bootstrap` from its setup script (or a SessionStart hook).
-- **Any sandbox.** Its network policy must allow the store's address, `registry.npmjs.org` and `github.com` (the `bd` download, or a mirror through `--release-base`).
+- **Any sandbox.** `bd` in the sandbox needs `registry.npmjs.org`, `github.com` (the `bd` download, or a mirror through `--release-base`) and the store's address. A sandbox whose policy refuses the store uses the [remote MCP connector](#ways-to-reach-a-store) instead; nobody has to change the policy for it.
 
 These two platform recipes follow the platforms' documented setup-script and environment-variable features; they have not been run on those platforms by this project.
 

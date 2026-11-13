@@ -1,2 +1,2 @@
 // Generated from VERSION by scripts/sync-version.mjs. Do not edit.
-export const STORE_VERSION = "0.2.17"; // x-release-please-version
+export const STORE_VERSION = "0.2.18"; // x-release-please-version
