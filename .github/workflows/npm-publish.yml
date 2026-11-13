@@ -1,0 +1,101 @@
+name: Publish to npm
+
+# Publishes the setup tool of a release to npm: `beads-cloudflare` (the package at the repository root) and
+# `create-beads-cloudflare` (cli/create, for `npm create beads-cloudflare`). It runs after a GitHub release of this
+# repository is published, from the release tag, through npm trusted publishing: GitHub's OIDC token proves this
+# repository and this workflow to npm, so no npm token is stored, and every version carries signed provenance that names
+# the source commit. A re-run skips a version npm already has. A manual run can publish a missed release or, with
+# dry_run (the default for manual runs), only show what would be published.
+#
+# Until a maintainer has registered this workflow as the trusted publisher of both packages on npmjs.com and set the
+# repository variable NPM_TRUSTED_PUBLISHING to "true", a release run only reports that npm publication is not set up;
+# the GitHub release itself is complete without it.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, vX.Y.Z"
+        required: true
+        type: string
+      dry_run:
+        description: "Pack and check only; publish nothing"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish beads-cloudflare and create-beads-cloudflare
+    if: github.repository == 'kombifyio/beads-cloudflare'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+      ENABLED: ${{ vars.NPM_TRUSTED_PUBLISHING == 'true' && 'true' || 'false' }}
+    steps:
+      - name: Check the tag
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "::error::$TAG is not a release tag vX.Y.Z"; exit 1; }
+          if [ "$DRY_RUN" != true ] && [ "$ENABLED" != true ]; then
+            echo "::notice title=npm publication is not set up::Register this workflow (npm-publish.yml) as the trusted publisher of beads-cloudflare and create-beads-cloudflare on npmjs.com, then set the repository variable NPM_TRUSTED_PUBLISHING to true and run this workflow for $TAG."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Both packages carry the release version
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          [ "$(tr -d '[:space:]' < VERSION)" = "$version" ] || { echo "::error::VERSION does not match $TAG"; exit 1; }
+          for manifest in package.json cli/create/package.json; do
+            have="$(node -p "require('./$manifest').version")"
+            [ "$have" = "$version" ] || { echo "::error::$manifest has version $have, not $version"; exit 1; }
+          done
+
+      - name: npm supports trusted publishing
+        run: |
+          set -euo pipefail
+          npm --version
+          node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) { console.error("npm 11.5.1 or later is required for trusted publishing"); process.exit(1); }' "$(npm --version)"
+
+      # The root package first: create-beads-cloudflare runs beads-cloudflare of the same version.
+      - name: Publish
+        run: |
+          set -euo pipefail
+          for dir in . cli/create; do
+            identity="$(node -p "const m = require('./$dir/package.json'); m.name + '@' + m.version")"
+            if [ -n "$(npm view "$identity" version 2>/dev/null)" ]; then
+              echo "$identity is already on npm; skipping."
+              continue
+            fi
+            if [ "$DRY_RUN" = true ]; then
+              (cd "$dir" && npm publish --dry-run --access public --provenance)
+            elif [ "$ENABLED" != true ]; then
+              echo "$identity: npm publication is not set up; not published."
+            elif ! (cd "$dir" && npm publish --access public --provenance); then
+              echo "::error title=npm publish failed::$identity: check that npm-publish.yml of this repository is the trusted publisher of the package on npmjs.com."
+              exit 1
+            fi
+          done

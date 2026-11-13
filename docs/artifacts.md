@@ -2,7 +2,7 @@
 
 The public source tree contains the same five-platform build recipe the maintainers'
 publisher uses. It builds files only; it has no publication or deployment authority.
-Start from the admitted public release tag. Install Git, Node 22.23.3 or later, Go,
+Start from the admitted public release tag. Install Git, Node (22.23+, 24.22+ or 26.12+), Go,
 Bash, GNU tar, gzip, zip and sha256sum (Linux or an equivalent build environment).
 The recipe selects the exact release Go toolchain in
 `spec/upstream/build-overlay.json`; `bd/go.mod` declares the language minimum.

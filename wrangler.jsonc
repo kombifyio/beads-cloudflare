@@ -1,6 +1,6 @@
 {
   // Neutral deployment template: it deploys into any Cloudflare account.
-  // `npx github:kombifyio/beads-cloudflare setup` (cli/) copies it, fills in the KV namespace id and
+  // `npx --yes beads-cloudflare setup` (cli/) copies it, fills in the KV namespace id and
   // your values, and deploys that copy. Do not put account values in this file.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "beads-cloudflare",
@@ -9,8 +9,11 @@
   // nodejs_compat: the MCP handler keeps its auth context in AsyncLocalStorage;
   // global_fetch_strictly_public: required by the OAuth provider for Client ID Metadata Documents.
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // Workers logs and traces, kept for operator diagnosis.
   "observability": { "enabled": true },
+  // Hourly maintenance: lapsed-claim sweep, health check, portfolio capture and the scheduled backup.
   "triggers": { "crons": ["17 * * * *"] },
+  // The store itself: one SQLite-backed TeamStore Durable Object per team name holds every tracker.
   "durable_objects": {
     "bindings": [{ "name": "TEAM_STORE", "class_name": "TeamStore" }]
   },
@@ -20,10 +23,19 @@
     { "binding": "OAUTH_KV", "id": "00000000000000000000000000000000" }
   ],
   "vars": {
+    // Optional JSON { hour?, retention_days?, late_tracker_prefixes? } for the scheduled backup: first UTC hour (default 3),
+    // snapshot retention in days (default 30) and tracker-id prefixes that are backed up last. Empty: the defaults.
+    "BACKUP_POLICY": "",
+    // Optional "|"-separated extra cron expressions (also added under triggers.crons) that run only the backup sweep. Empty: none.
+    "BACKUP_SWEEP_ONLY_CRONS": "",
     // The single team of phase 1; one TeamStore Durable Object per team name.
     "TEAM": "default",
+    // Heading of the dashboard.
     "PORTFOLIO_TITLE": "Beads portfolio",
+    // JSON list of { id, name, tracker, group } entries: the repositories the dashboard and portfolio tools show. Empty: none.
     "PORTFOLIO_REPOSITORIES": "",
+    // JSON { groups?, phases?, conventions? }: display names for groups and phases, and the label conventions of your trackers
+    // (repository prefix, milestone label, phase prefix, waiting labels). Empty: raw keys and neutral conventions.
     "PORTFOLIO_LABELS": "",
     // Canonical public origin: the OAuth resource (token audience) and issuer.
     "PUBLIC_ORIGIN": "https://beads.example.workers.dev",
@@ -33,10 +45,22 @@
     // Empty denies repository exchanges. Import requires an explicit operator grant. An entry with
     // oidc may name portfolio_readers: its main workflows that receive one-hour read-only credentials
     // for any mapped tracker (credential_type "github-portfolio-reader"), never write or import.
+    // oidc.read_only_workflows names admitted writer refs whose every job is capped at the same
+    // one-hour read scopes, including jobs outside a portfolio_readers environment.
     "GITHUB_REPOSITORIES": "{}",
+    // Optional compact workflow grants for mapped repositories with oidc, kept apart so every binding stays within
+    // Cloudflare's 5120-byte text limit: { repository_owner_id, repository, tracker, readers?, writers? }, where
+    // readers maps "owner/caller" -> { "workflow.yml": [events] } and writers maps "owner/caller" ->
+    // { "workflow.yml": { events, job_workflow_ref? } }. Each entry is parsed exactly like the equivalent
+    // portfolio_readers/portfolio_writers object grant naming that owner, repository and tracker; a malformed
+    // value denies every tracker. Empty: no compact grants.
+    "GITHUB_WORKFLOW_GRANTS": "",
     // Optional { app_id, installation_id, repositories: ["owner/repository"] } read-only App grant.
     // Empty denies App readers; it never changes the repository/tracker writer mappings.
     "GITHUB_READ_APP": "",
+    // Optional { repository, workflow_ref, repository_owner_id }: the one main-branch workflow allowed to close a merged issue for
+    // its claim holder (scope beads:merge-close); it intersects the GITHUB_REPOSITORIES mappings. Empty: merge closure is off.
+    "GITHUB_MERGE_CLOSER": "",
     // Optional { repository, path, tracker } generated state page shown in the dashboard State view to viewers
     // of that tracker; read with the GITHUB_READ_APP reader. Empty: no State view.
     "STATE_PAGE": "",

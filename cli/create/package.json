@@ -1,0 +1,26 @@
+{
+  "name": "create-beads-cloudflare",
+  "version": "0.2.17",
+  "description": "npm create beads-cloudflare: set up a shared Beads tracker in your Cloudflare account.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "create-beads-cloudflare": "index.mjs"
+  },
+  "files": [
+    "index.mjs"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kombifyio/beads-cloudflare.git",
+    "directory": "cli/create"
+  },
+  "homepage": "https://github.com/kombifyio/beads-cloudflare#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": "^22.23.0 || ^24.22.0 || >=26.12.0"
+  }
+}

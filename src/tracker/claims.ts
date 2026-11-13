@@ -86,16 +86,34 @@ export const isHolder = (ctx: Ctx, row: IssueRow) => {
   return row.lease_expires_at === null ? row.assignee === workerOf(ctx) : samePrincipal(ctx, row);
 };
 
-/** The 409 that tells a caller who holds the row, until when and what to do about it. */
+/** "in 1 h 5 min" / "in 12 min" / "in under a minute"; empty when the time is unknown or already past. */
+function untilText(until: string | null, now: string): string {
+  if (until === null) return "";
+  const ms = Date.parse(until) - Date.parse(now);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const minutes = Math.ceil(ms / 60000);
+  if (ms < 60000) return " (in under a minute)";
+  return minutes >= 60 ? ` (in ${Math.floor(minutes / 60)} h ${minutes % 60} min)` : ` (in ${minutes} min)`;
+}
+
+/**
+ * The 409 that tells a caller who holds the row, until when and what to do about it. Only routes that work in this
+ * store are named: act as the holding worker, wait for the lease, have the holder finish or release, or the
+ * deliberate `release` with `force` (`bd unclaim --force`) for an abandoned claim.
+ */
 export function heldByOther(ctx: Ctx, row: IssueRow, via = "change") {
   const sameOwner = samePrincipal(ctx, row);
   const until = row.lease_expires_at ?? "an unknown time";
+  const holder = claimHolder(row);
+  const who = `worker "${row.assignee}"${holder !== "" && holder !== row.assignee ? ` (verified principal ${holder})` : ""}`;
+  const lapse = `The lease lapses at ${until}${untilText(row.lease_expires_at, ctx.now)} unless the holder keeps writing to the issue (each holder write extends it by ${DEFAULT_LEASE_SECONDS / 3600} h); after that anyone may claim or change it.`;
   const hint = sameOwner
-    ? `Your credential holds it as worker "${row.assignee}": act with that worker name (--actor or BEADS_ACTOR), or wait for the lease to lapse.`
-    : "Wait for the lease to lapse or ask the holder to release it; a deliberate takeover is `release` with `force`.";
-  return refuse("already_claimed", `this issue is claimed by "${row.assignee}" until ${until}, so you cannot ${via} it. ${hint}`, {
+    ? `Your credential is the verified holder, but a claim is held per worker name and this request acts as "${workerOf(ctx)}". Repeat it as "${row.assignee}" (\`--actor ${row.assignee}\` or BEADS_ACTOR=${row.assignee}), or wait. ${lapse}`
+    : `Options: (1) wait. ${lapse} (2) Ask the holder to finish the work or give the claim back (\`bd unclaim ${row.id}\` as that worker). (3) Only if the claim is abandoned, take it over deliberately with \`bd unclaim ${row.id} --force\` (it is recorded and invalidates the holder's fencing token), then claim the issue yourself. A close with \`--force\` does not override a claim.`;
+  return refuse("already_claimed", `issue ${row.id} is claimed by ${who} until ${until}, so you cannot ${via} it. ${hint}`, {
     reason: "claimed_by_other",
     assignee: row.assignee,
+    issue_id: row.id,
     // The holder is named separately: the assignee is the name work is allocated to, which the caller
     // chooses, so it does not by itself identify who may act on the claim.
     x_claimed_by: claimHolder(row),

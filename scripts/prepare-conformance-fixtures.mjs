@@ -19,7 +19,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const source = fs.readFileSync(path.join(root, 'spec/upstream/SOURCE.md'), 'utf8');
 const tag = /^- Tag: (v\d+\.\d+\.\d+)\s*$/m.exec(source)?.[1];
 const sha = /^- Commit: ([a-f0-9]{40})\s*$/m.exec(source)?.[1];
-if (tag !== 'v1.3.1' || sha !== 'c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c') throw new Error('requalify conformance fixtures for the changed upstream source');
+if (tag !== 'v1.3.4' || sha !== '7ef2fd05eb0cd3bdbde051f93cfc14ccf270cdde') throw new Error('requalify conformance fixtures for the changed upstream source');
 const moduleSource = fs.readFileSync(path.join(root, 'bd/go.mod'), 'utf8');
 const modulePins = [...moduleSource.matchAll(/^\s*(?:require\s+)?github\.com\/steveyegge\/beads\s+(\S+)/gm)];
 if (modulePins.length !== 1 || modulePins[0][1] !== tag) throw new Error('conformance fixture source differs from the native module pin');

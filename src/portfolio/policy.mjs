@@ -1,7 +1,8 @@
 // Canonical workspace policy, projected verbatim into beads-cloudflare.
 // Native leases own allocation; comments retain train provenance only. Native ready is unchanged.
-export const WAITING_LABEL = /^(train-blocked|blocked-.+|test-window|build-phase-test-window|pending-window)$/;
-const WAITING = WAITING_LABEL;
+// A waiting label keeps an issue out of the actionable selection. The neutral default is the `blocked-*` family;
+// a deployment passes its own convention as `options.isWaiting` (a label predicate).
+export const WAITING_LABEL = /^blocked-.+$/;
 const WINDOW = 24 * 3600_000;
 const done = (issue) => issue.status === "closed" || issue.status === "pinned";
 const key = (tracker, id) => `${tracker}/${id}`;
@@ -35,6 +36,7 @@ export function threadClaim(issue, now) {
 }
 export function projectWork(stores, catalog, options = {}) {
     const now = Date.now();
+    const isWaiting = options.isWaiting ?? (label => WAITING_LABEL.test(label));
     // An explicit order is a priority prefix; unlisted repositories retain the train's P0/name ranking.
     const repositoryOrder = options.repositoryOrder ?? catalog.map(repo => repo.name);
     const rank = (repo) => { const i = repositoryOrder.indexOf(repo); return i < 0 ? repositoryOrder.length : i; };
@@ -105,7 +107,7 @@ export function projectWork(stores, catalog, options = {}) {
         if (issue.issue_type === "epic" || issue.issue_type === "milestone" || issue.labels?.includes("milestone"))
             reasons.push({ code: "planning_container", detail: "epics and milestones organize work; select an executable child" });
         for (const label of issue.labels ?? [])
-            if (WAITING.test(label))
+            if (isWaiting(label))
                 reasons.push({ code: "waiting_label", detail: label });
         if (nativeLive)
             reasons.push({ code: "native_claim", detail: native && typeof native === "object" && "assignee" in native ? `claimed by ${native.assignee} until ${native.lease_expires_at ?? issue.lease_expires_at}; the holder's writes renew the lease and a lapsed lease releases itself` : "a live claim holds this issue until its lease lapses" });
@@ -134,7 +136,9 @@ export function projectWork(stores, catalog, options = {}) {
     for (const row of rows)
         if (row.priority === 0 && row.issue_type !== "epic" && ["open", "in_progress", "blocked"].includes(row.status))
             p0[row.repo] = (p0[row.repo] ?? 0) + 1;
-    rows.sort((a, b) => a.priority - b.priority || rank(a.repo) - rank(b.repo) || (rank(a.repo) === repositoryOrder.length ? (p0[b.repo] ?? 0) - (p0[a.repo] ?? 0) || a.repo.localeCompare(b.repo) : 0) || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+    // Findings of outside users (source:public) rank before internal findings of the same priority (AP16.5).
+    const internal = (row) => (row.labels.includes("source:public") ? 0 : 1);
+    rows.sort((a, b) => a.priority - b.priority || internal(a) - internal(b) || rank(a.repo) - rank(b.repo) || (rank(a.repo) === repositoryOrder.length ? (p0[b.repo] ?? 0) - (p0[a.repo] ?? 0) || a.repo.localeCompare(b.repo) : 0) || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
     return {
         schema: "beads.actionable.v1", generated_at: new Date(now).toISOString(), authority: "cloudflare", partial: stores.some(store => store.kind !== "ok"),
         definitions: { scope: "all stored issue types and tiers, including templates, gates, ephemeral records, epics and deferred", nonterminal: "every status except closed and pinned, including epics and deferred", native_ready: "unchanged upstream-compatible ready membership before train policy", actionable: "native ready or expired/quiet unleased in-progress work, excluding containers, waiting labels, active claims, held repositories, and unsupported foreign blockers", cross_tracker_dependencies: "display resolution only; native scheduling does not enforce cross-tracker edges", consistency: "revision-stable within each tracker; observations across trackers are not atomic", details: "items are selection summaries; retrieve the authoritative full issue through bead_get or beads:read show before working" },

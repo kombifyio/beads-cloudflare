@@ -1,419 +1,373 @@
-Source versions below do not all correspond to public packages. See [published releases](https://github.com/kombifyio/beads-cloudflare/releases) for the available downloads.
-
 # Changelog
 
 All notable changes are documented here. Versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: minor
 versions may break). The store, `bd` and the setup tool carry one version, the `VERSION` file.
 
+Entries describe the behaviour of the store, `bd` and the setup tool for any operator. A version heading is a source
+version; not every source version is published as a release. Write new entries under `Unreleased`; a release moves
+them under `## X.Y.Z (YYYY-MM-DD)`.
+
 ## Unreleased
 
-## [0.2.15](https://github.com/kombifyio/beads-cloudflare/releases/tag/v0.2.15) (2026-11-01)
+### Added
+
+- Setup tool commands: `init` (the same as `setup`), `migrate <store url>` (moves an existing Beads workspace into a
+  tracker: export, back up `.beads`, join, import, compare counts), `invite` (a key and the command for a teammate),
+  `keys create|list|revoke`, `agents` (instructions and the MCP server for Claude Code and Codex), `mcp` (a stdio MCP
+  server using the credential `bd` uses), `dev` (a store on this machine through `wrangler dev --local`, no Cloudflare
+  account) and `cf` (runs the tested Cloudflare CLI, for example `cf auth login`).
+- The setup tool can be published to npm as `beads-cloudflare`, with `create-beads-cloudflare` for
+  `npm create beads-cloudflare`; the user-facing commands read `npx --yes beads-cloudflare <command>`.
+- Store configuration: `BACKUP_POLICY.late_tracker_prefixes` names tracker-id prefixes (for example scratch or test
+  trackers) that the scheduled backup handles after all others, and `PORTFOLIO_LABELS.conventions.waiting_labels` now
+  also decides which labels keep work out of the actionable-work selection. Both default to neutral values (no late
+  prefixes, so trackers named `cf-test-*` are no longer moved to the end unless listed; `blocked-*`). The deployment template documents every setting and offers an optional `BACKUP_POLICY`.
+
+### Changed
+
+- Setup uses the `cf` version each release is tested with, installed on demand together with Wrangler into the user
+  cache the first time `setup`, `dev` or `cf` needs it. Joining a store no longer installs any deploy tooling.
+- `join` asks for the agent key without echoing it, or reads it from `--token-file <file>` (`-` for standard input).
+  Every failure names the exact next command, and the first `bd` command after `join` runs quietly.
+- One Node requirement for every command: 22.23+, 24.22+ or 26.12+.
+- The dashboard is in English by default; German is chosen when the browser asks for it first and can be selected.
+- Claim conflicts: a refusal names the issue, the holding worker, the lease expiry with the time left and only the routes
+  that work in this store (act as the holder, wait, have the holder release, or `bd unclaim --force` for an abandoned
+  claim), and carries `issue_id`. `bd` shows the store's text instead of a bare "already claimed".
+- Roadmaps: the phase key of a milestone is `Phase:`; `Central:` stays accepted as an alias.
+- Upstream Beads is now `v1.3.4` (was `v1.3.1`); the module path is unchanged.
+- Write settlement: a write bound to a write operation (`X-Beads-Operation: <UUID>`) may start its `Idempotency-Key`
+  with any short lowercase label, as `<label>-<UUID>-<request>` (for example `app-<UUID>-1`); the label has no hyphen,
+  so the UUID sits at one fixed place. Keys that clients already send stay valid. The store still refuses a bound write
+  whose key names another UUID, before it changes anything.
+
+### Removed
+
+- `--allow-outdated-cf`: setup no longer compares `cf` with the newest release on npm.
+
+### Fixed
+
+- Memory keys derived from content are computed in one linear pass, so a long run of separators cannot slow the store.
+- Scheduled backup: a tracker that is written while it is read no longer fails the day. A large tracker is read twice
+  instead of three times; a contended tracker is read again at once and, if it keeps moving, waits in a bounded retry
+  queue in the progress record for the later runs of the day, so one transient failure no longer voids the day's
+  traversal. A progress write that R2 refuses is read back and either adopted (it had committed) or sent again, never
+  replayed blindly; repeatable R2 operations are tried again on `10001`, `10043` and `10058`. A tracker that fails every
+  attempt of the day, or fails in a way no attempt can cure, still fails the sweep and withholds the heartbeat.
+
+### Security
+
+- GitHub exchange: a refused Actions OIDC token whose signature verified names the first claim the policy did not admit
+  (`reason: oidc_claim_not_admitted`, `x_claim`), its own value and the setting to edit, never the admitted values. A
+  GitHub App installation token is refused before any call to GitHub (`reason: installation_token_not_admitted`), and
+  refusals name the non-interactive credentials the store admits.
+- GitHub Actions OIDC: an exact `oidc.read_only_workflows` list caps every job of a named workflow at read-only
+  tracker scopes, so a job of that workflow can no longer obtain write or import credentials, whatever environment it
+  runs in.
+- GitHub Actions OIDC: exact workflow reader and writer grants can live in the separate compact `GITHUB_WORKFLOW_GRANTS`
+  binding, which states the owner, target repository and tracker once. The Worker expands each entry into the
+  equivalent inline object grant before the unchanged validation, so admission is identical; a malformed value denies
+  every tracker. The deploy configuration check holds every text binding to Cloudflare's 5120-byte limit, and setup
+  preserves the new binding like the other authorization settings.
+
+## 0.2.17 (2026-11-10)
+
+### Fixed
+
+- Scheduled backup: keep daily per-tracker outcomes, a bounded backoff and an explicit list of failed trackers; a later
+  run resumes only unfinished work and sends the heartbeat only when every tracker is archived.
+- Add authenticated administrator operations to start or resume a backup sweep and to read its state, and schedule six
+  backup slots per hour within the existing check, wall-time and CPU limits.
+
+## 0.2.16 (2026-11-02)
+
+### Fixed
+
+- Scheduled backup: live-test trackers (`cf-test-*`) sweep after the durable trackers, and a durable tracker is checked
+  again every hourly run until its archive for the day exists, so a backlog of test trackers no longer leaves a durable
+  tracker without its daily snapshot.
+
+## 0.2.15 (2026-11-01)
 
 ### Features
 
 - Store health monitoring: `GET /admin/health`, hourly health samples and threshold alerts.
-- Claim lock: a status of `in_progress` is a claim held by the principal and the worker name, the holder's writes renew the 2-hour lease, a lapsed lease releases itself with a `lease_expired` event, and a one-time migration releases locks that predate real claims (assignee, lease and holder only; status and content untouched).
+- Claim lock: a status of `in_progress` is a claim held by the principal and the worker name, the holder's writes renew
+  the 2-hour lease, a lapsed lease releases itself with a `lease_expired` event, and a one-time migration releases locks
+  that predate real claims (assignee, lease and holder only; status and content untouched).
 
 ## 0.2.14 (2026-11-01)
 
-
 ### Features
 
-* add coherent analysis and durable Beads operations (#219) (df8bc7c)
+- Coherent analysis reads and durable, resumable multi-step write operations.
 
+### Fixed
 
-### Bug Fixes
-
-* **backup:** retry an interrupted tracker first in the next run (beads-cloudflare-j1i.5) (#223) (aebb494)
-* **tracker:** secure claims and complete durable backups (#222) (05f9175)
+- Scheduled backup: a tracker whose backup was interrupted is retried first in the next run.
+- Claims are bound to their holder, and a scheduled backup completes every tracker it starts.
 
 ## 0.2.13 (2026-10-31)
 
+### Changed
 
-### Features
+- The Worker builds with Vite+ 1.4.0.
 
-* **toolchain:** move beads-cloudflare to Vite+ 1.4.0 (platform-uv4ut) (#216) (fed6156)
+### Fixed
 
-
-### Bug Fixes
-
-* **backup:** sweep durable trackers before CI and drill trackers (beads-cloudflare-j1i.5) (#215) (b869034)
+- Scheduled backup: durable trackers sweep before CI and drill trackers.
 
 ## 0.2.12 (2026-10-29)
 
+### Changed
 
-### Bug Fixes
-
-* **deps:** pin cf 1.0.0-beta.26 so the Deploy currency gate passes (#209) (56c80e6)
+- Deployment uses the Cloudflare CLI `cf` 1.0.0-beta.26.
 
 ## 0.2.11 (2026-10-29)
 
+### Fixed
 
-### Bug Fixes
-
-* **auth:** admit the CI writers of held contract steps and Stage ledger warnings (#207) (076e87c)
-* **recovery:** keep closed failure diagnostics for Preview recovery runs (#204) (6937a1a)
+- Recovery: closed failure diagnostics of recovery runs are kept.
 
 ## 0.2.10 (2026-10-27)
 
+### Changed
 
-### Bug Fixes
-
-* **deps:** pin cf 1.0.0-beta.23 so the Deploy currency gate passes (#200) (78fac74)
+- Deployment uses the Cloudflare CLI `cf` 1.0.0-beta.23.
 
 ## 0.2.9 (2026-10-27)
 
+### Fixed
 
-### Bug Fixes
-
-* **backup:** bound scheduled scans and retain crash progress (#197) (ef5452f)
-* **mcp:** split an overlong or multiline close reason into a short reason and an evidence comment (#196) (d79ea31)
+- Scheduled backup: scans are bounded and a crashed run keeps its progress.
+- MCP: an overlong or multi-line close reason is split into a short reason and an evidence comment.
 
 ## 0.2.8 (2026-10-26)
 
-
-### Bug Fixes
-
-* **ci:** pin product-delivery to the registry version-path guard (f4a10ebf) (#185) (129ef2f)
+No user-visible change.
 
 ## 0.2.7 (2026-10-25)
 
-
 ### Features
 
-* **dashboard:** configurable label conventions with neutral defaults (#182) (eeac8f9)
-* **recovery:** restore the pinned Beads archive through the native window (#180) (f32d013)
+- Dashboard: label conventions are configurable and have neutral defaults.
+- Recovery: restore a pinned Beads archive through the native restore window.
 
+### Fixed
 
-### Bug Fixes
-
-* **auth:** open the OAuth browser without cmd.exe on Windows (platform-f4ggj.11) (#168) (6a2c8b7)
-* **backup:** bind scheduled archives to immutable source identity (#176) (fa12553)
-* **ci:** adopt Node security workflow producers (#173) (e5be646)
-* **dashboard:** apply second-model review of the focus views (#178) (a80a7f6)
-* **delivery:** call the Delivery producer with the fixed public surface scan (#175) (6d2f06f)
-* **portfolio:** project verified native claim ownership (#169) (6cbc427)
-* **toolchain:** patch Beads Node runtimes and the edge image pin (#171) (f75219f)
+- Human sign-in opens the browser without `cmd.exe` on Windows.
+- Scheduled backup: archives are bound to the immutable identity of their source.
+- Dashboard: review fixes to the focus views.
+- Portfolio: verified native claim ownership is projected.
+- Toolchain: patched Node runtimes.
 
 ## 0.2.6 (2026-10-24)
 
+### Changed
 
-### Bug Fixes
-
-* **deploy:** adopt current cf beta.21 for Worker publication (#165) (abd88f6)
+- Deployment uses the Cloudflare CLI `cf` 1.0.0-beta.21.
 
 ## 0.2.5 (2026-10-24)
 
+### Fixed
 
-### Bug Fixes
-
-* **auth:** admit exact-target OIDC reader for schema admission (#158) (982153b)
-* **preview:** retain safe journey failure evidence (#157) (10b23fe)
+- GitHub Actions OIDC: an exact-target reader grant is admitted.
+- Failure evidence of journeys is kept in a safe, redacted form.
 
 ## 0.2.4 (2026-10-23)
 
+### Fixed
 
-### Bug Fixes
-
-* qualify reclaim fixtures for the declared lease horizon (#155) (f63af9a)
+- Claim reclaim fixtures follow the declared lease horizon.
 
 ## 0.2.3 (2026-10-23)
 
+### Fixed
 
-### Bug Fixes
-
-* **backup:** archive large trackers as bounded snapshot parts (beads-cloudflare-j1i.5) (#150) (7a4e7c2)
-* bind attended Beads worker and public publication together (#152) (919bdd1)
-* **delivery:** pin prepare-release-publication to the queued-parent fix (shared delivery authority #2606) (#149) (3f99da9)
-* **release:** redact internal authority from public changelog (#154) (5f13b03)
-* select exact external references before tracker pagination (#151) (ce71e50)
+- Scheduled backup: a large tracker is archived as bounded snapshot parts.
+- External references are selected exactly before tracker pagination.
+- The public changelog no longer names internal systems.
 
 ## 0.2.2 (2026-10-22)
 
+### Changed
 
-### Bug Fixes
-
-* **deps:** update dependency wrangler to v4.151.3 (#124) (0f50ea6)
+- Wrangler 4.151.3 for local development and tests.
 
 ## 0.2.1 (2026-10-21)
 
-
 ### Features
 
-* **ops:** operator restore drill with live comparison and key revocation (#141) (5b27436)
+- Operations: an operator restore drill with a live comparison and key revocation.
 
+### Changed
 
-### Bug Fixes
-
-* **deps:** update cf to 1.0.0-beta.20 (the deploy currency gate refused beta.18) (#140) (f6b9ee4)
+- Deployment uses the Cloudflare CLI `cf` 1.0.0-beta.20.
 
 ## 0.2.0 (2026-10-21)
 
+Collects every change of 0.1.2 to 0.1.19, plus:
 
 ### Features
 
-* add Access-protected Beads portfolio dashboard (#43) (9cbf5c6)
-* **auth:** enable portable repository-scoped tracker access (#8) (fd87151)
-* **auth:** grant configured main-branch workflows read-only access to every mapped tracker (#137) (bb289a3)
-* **auth:** grant pinned GitHub App tracker read access (#29) (60ac484)
-* **beads:** cloud sessions get Beads access via OIDC workflow (#61) (5bfd30e)
-* **claims:** lock work by claim across sessions (#138) (55bf77d)
-* **dashboard:** add areas, ecosystem scopes and epic modules (#48) (36cdc5f)
-* **dashboard:** name groups and phases from deployment labels (#99) (30d8921)
-* **dashboard:** render repository roadmaps with checklists and linked beads (#82) (eb67f1a)
-* **dashboard:** roadmap overview, repository milestone page and compact tables (#90) (8763430)
-* **dashboard:** show roadmap milestones per repository and central phase (#76) (91216ee)
-* **dashboard:** show store health to operators (#100) (858918d)
-* **dashboard:** sort and filter repository columns (#51) (4a9f13e)
-* **dashboard:** state tab reading the generated workspace state page (F3) (#93) (e987ce8)
-* **deploy:** admit the beads-session OIDC workflow for every product repository (#59) (fdff407)
-* enroll Beads in compiled Delivery (#11) (96f41ed)
-* **mcp:** Beads over MCP with OAuth sign-in (H2) (#107) (83757c8)
-* **ops:** scheduled daily logical backups to a private R2 bucket (#101) (8447ac1)
-* **ops:** store health endpoint, hourly samples and threshold alerts (#92) (7295303)
-* **train:** on-demand train lane, train merge job and auto-delivery (D5) (#108) (7c9c15a)
+- GitHub Actions OIDC: configured `main`-branch workflows can get read-only access to every mapped tracker.
+- Claims lock work across sessions.
 
+### Fixed
 
-### Bug Fixes
-
-* admit tracker migration batches atomically (#10) (a40085c)
-* **auth:** accept bare workflow file names in the OIDC policy (#60) (487ac24)
-* **auth:** keep GitHub off the hourly credential path (#83) (fd31135)
-* **auth:** preserve actor isolation and admit bounded publication bootstrap (#9) (737d316)
-* **beads:** complete agent workflows and recovery proof (#132) (a4be02e)
-* **bootstrap:** authenticate fresh Linux Agent Home refreshes (#75) (3bc7afe)
-* **bootstrap:** GitHub Actions is no longer a bootstrap gap (#41) (77d39db)
-* **bootstrap:** project the portable Agent Home entrypoint (#74) (592af11)
-* **bootstrap:** restore portable authenticated staff tools (#80) (ea6dd2b)
-* **ci:** adopt qualified private checkout diagnostics (#12) (6cccae7)
-* **ci:** make the OSS export check and the standards gate pass on main (#84) (4dafa03)
-* **ci:** pin the standards gate that reads the registered version file (#85) (5edec30)
-* **dashboard:** configure the state page source instead of naming it (F3) (#95) (b9173b8)
-* **dashboard:** replace range inputs with status dropdown (#56) (10c0b36)
-* **delivery:** forward the CI App key and add the Delivery preflight (D5) (#110) (547d832)
-* **deploy:** name both cf versions when the currency gate refuses (#120) (5364221)
-* **deploy:** update cf CLI to the current release (#78) (b80c6db)
-* **deps:** update dependency zod to v4.6.7 (#63) (41bec56)
-* harden public setup, recovery and release integrity (#49) (adebb8a)
-* **oss:** keep auto-delivery.yml out of the public export (D5) (#113) (c673823)
-* **oss:** neutralize internal names a commit title carries into the public changelog (#118) (a7cc7b3)
-* **oss:** project SHA compare links and neutralize an ecosystem name in the public changelog (#134) (f9c6eda)
-* preserve credentials and qualify rolling Worker activation (#53) (0e078dd)
-* preserve same-origin dashboard logout (#47) (98bff7d)
-* project canonical release notes into public export (#27) (2df88dc)
-* qualify dashboard deployment readback through propagation (#45) (f4b80ff)
-* resolve Worker source imports in deployment verifier (#28) (679eee3)
-* retain existing historical identities in guarded migration (#37) (5001ccc)
-* **store:** mint issue ids under the configured issue prefix (#35) (b4db95c)
-* **train:** on-demand runs take the fast checkpoint, the stamping carve-out (D5) (#109) (abb5e6d)
-* **train:** the scheduled train dispatches the fast checkpoint for the stamping product (C4b) (#114) (514f7cc)
-* update cf CLI to the current deployment release (#31) (bc2406f)
-* wait for exact Worker identity during propagation (#33) (6183a21)
-
-Notes cover changes after VERSION 0.1.0 (06acb22d314c6d64774c50c364c356660f0482aa), the earliest available contiguous 0.1.x VERSION anchor, through selected source 55bf77de46af7bdc2aaa80dad8639298529c2b58.
+- Agent workflows and their recovery are complete end to end.
 
 ## 0.1.19 (2026-10-18)
 
+### Fixed
 
-### Bug Fixes
-
-* **deploy:** name both cf versions when the currency gate refuses (#120) (5364221)
+- Deployment names both `cf` versions when the CLI version check refuses.
 
 ## 0.1.18 (2026-10-18)
 
-
-### Bug Fixes
-
-* **delivery:** forward the CI App key and add the Delivery preflight (D5) (#110) (547d832)
-* **oss:** keep auto-delivery.yml out of the public export (D5) (#113) (c673823)
-* **train:** the scheduled train dispatches the fast checkpoint for the stamping product (C4b) (#114) (514f7cc)
+No user-visible change.
 
 ## 0.1.17 (2026-10-17)
 
-
 ### Features
 
-* **dashboard:** name groups and phases from deployment labels (#99) (30d8921)
-* **dashboard:** render repository roadmaps with checklists and linked beads (#82) (eb67f1a)
-* **dashboard:** roadmap overview, repository milestone page and compact tables (#90) (8763430)
-* **dashboard:** show store health to operators (#100) (858918d)
-* **dashboard:** state tab reading the generated workspace state page (F3) (#93) (e987ce8)
-* **mcp:** Beads over MCP with OAuth sign-in (H2) (#107) (83757c8)
-* **ops:** scheduled daily logical backups to a private R2 bucket (#101) (8447ac1)
-* **ops:** store health endpoint, hourly samples and threshold alerts (#92) (7295303)
-* **train:** on-demand train lane, train merge job and auto-delivery (D5) (#108) (7c9c15a)
+- Dashboard: group and phase names come from deployment labels.
+- Dashboard: repository roadmaps render with checklists and linked issues; a roadmap overview, a milestone page per
+  repository and compact tables.
+- Dashboard: store health for operators, and a state tab that reads a configured state page.
+- MCP: Beads over MCP with OAuth sign-in.
+- Operations: scheduled daily logical backups to a private R2 bucket.
+- Operations: a store health endpoint, hourly samples and threshold alerts.
 
+### Fixed
 
-### Bug Fixes
-
-* **auth:** keep GitHub off the hourly credential path (#83) (fd31135)
-* **bootstrap:** restore portable authenticated staff tools (#80) (ea6dd2b)
-* **ci:** make the OSS export check and the standards gate pass on main (#84) (4dafa03)
-* **ci:** pin the standards gate that reads the registered version file (#85) (5edec30)
-* **dashboard:** configure the state page source instead of naming it (F3) (#95) (b9173b8)
-* **deps:** update dependency zod to v4.6.7 (#63) (41bec56)
-* **train:** on-demand runs take the fast checkpoint, the stamping carve-out (D5) (#109) (abb5e6d)
+- GitHub sign-in no longer sits on the hourly credential refresh path.
+- Dashboard: the state page source is configured, not built in.
+- zod 4.6.7.
 
 ## 0.1.16 (2026-10-15)
 
+### Changed
 
-### Bug Fixes
-
-* **deploy:** update cf CLI to the current release (#78) (b80c6db)
+- Deployment uses the current Cloudflare CLI release.
 
 ## 0.1.15 (2026-10-15)
 
-
 ### Features
 
-* **dashboard:** show roadmap milestones per repository and central phase (#76) (91216ee)
-
-
-### Bug Fixes
-
-* **bootstrap:** authenticate fresh Linux Agent Home refreshes (#75) (3bc7afe)
-* **bootstrap:** project the portable Agent Home entrypoint (#74) (592af11)
+- Dashboard: roadmap milestones per repository and phase.
 
 ## 0.1.14 (2026-10-12)
 
-
 ### Features
 
-* **beads:** cloud sessions get Beads access via OIDC workflow (#61) (5bfd30e)
-* **deploy:** admit the beads-session OIDC workflow for every product repository (#59) (fdff407)
+- GitHub Actions OIDC: a workflow can obtain tracker access for a cloud session.
 
+### Fixed
 
-### Bug Fixes
-
-* **auth:** accept bare workflow file names in the OIDC policy (#60) (487ac24)
+- GitHub Actions OIDC: the policy accepts bare workflow file names.
 
 ## 0.1.13 (2026-10-10)
 
+### Fixed
 
-### Bug Fixes
-
-* **dashboard:** replace range inputs with status dropdown (#56) (10c0b36)
+- Dashboard: a status dropdown replaces the range inputs.
 
 ## 0.1.12 (2026-10-10)
 
+### Fixed
 
-### Bug Fixes
-
-* preserve credentials and qualify rolling Worker activation (#53) (0e078dd)
+- Credentials are preserved across a redeploy, and a rolling Worker activation is checked before it counts.
 
 ## 0.1.11 (2026-10-10)
 
-
 ### Features
 
-* **dashboard:** sort and filter repository columns (#51) (4a9f13e)
+- Dashboard: sortable and filterable repository columns.
 
 ## 0.1.10 (2026-10-10)
 
-
 ### Features
 
-* **dashboard:** add areas, ecosystem scopes and epic modules (#48) (36cdc5f)
+- Dashboard: areas, scopes and epic modules.
 
+### Fixed
 
-### Bug Fixes
-
-* harden public setup, recovery and release integrity (#49) (adebb8a)
+- Public setup, recovery and release integrity are hardened.
 
 ## 0.1.9 (2026-10-10)
 
+### Fixed
 
-### Bug Fixes
-
-* preserve same-origin dashboard logout (#47) (98bff7d)
-* qualify dashboard deployment readback through propagation (#45) (f4b80ff)
+- Dashboard logout stays on the same origin.
+- Dashboard deployment readback waits for propagation.
 
 ## 0.1.8 (2026-10-10)
 
-
 ### Features
 
-* add Access-protected Beads portfolio dashboard (#43) (9cbf5c6)
-
-
-### Bug Fixes
-
-* **bootstrap:** GitHub Actions is no longer a bootstrap gap (#41) (77d39db)
+- A portfolio dashboard behind Cloudflare Access.
 
 ## 0.1.7 (2026-10-09)
 
+### Fixed
 
-### Bug Fixes
-
-* retain existing historical identities in guarded migration (#37) (5001ccc)
+- A guarded migration keeps existing historical identities.
 
 ## 0.1.6 (2026-10-09)
 
+### Fixed
 
-### Bug Fixes
-
-* **store:** mint issue ids under the configured issue prefix (#35) (b4db95c)
+- The store mints issue IDs under the configured issue prefix.
 
 ## 0.1.5 (2026-10-09)
 
+### Fixed
 
-### Bug Fixes
-
-* wait for exact Worker identity during propagation (#33) (6183a21)
+- Deployment waits for the exact Worker identity during propagation.
 
 ## 0.1.4 (2026-10-09)
 
+### Changed
 
-### Bug Fixes
-
-* update cf CLI to the current deployment release (#31) (bc2406f)
+- Deployment uses the current Cloudflare CLI release.
 
 ## 0.1.3 (2026-10-09)
 
-
 ### Features
 
-* **auth:** grant pinned GitHub App tracker read access (#29) (60ac484)
+- A pinned GitHub App installation can get read access to its trackers.
 
+### Fixed
 
-### Bug Fixes
-
-* resolve Worker source imports in deployment verifier (#28) (679eee3)
+- The deployment verifier resolves Worker source imports.
 
 ## 0.1.2 (2026-10-09)
 
+### Fixed
 
-### Features
+- Tracker migration batches are admitted atomically.
+- Actor isolation is preserved.
 
-* enroll Beads in compiled Delivery (#11) (96f41ed)
-
-
-### Bug Fixes
-
-* admit tracker migration batches atomically (#10) (a40085c)
-* **auth:** preserve actor isolation and admit bounded publication bootstrap (#9) (737d316)
-* **ci:** adopt qualified private checkout diagnostics (#12) (6cccae7)
-* project canonical release notes into public export (#27) (2df88dc)
-
-## [0.1.1] - 2026-10-08
+## 0.1.1 (2026-10-08)
 
 ### Added
 
-- Repository-scoped GitHub credential exchange for developers and explicitly admitted GitHub Actions OIDC workflows.
-- Portable bootstrap and credential refresh for fresh clones without storing secrets in repositories.
+- Repository-scoped GitHub credential exchange for developers and for listed GitHub Actions OIDC workflows.
+- Credential refresh for fresh clones without storing secrets in repositories.
 
 ### Fixed
 
 - Preserve tombstone deletion records during tracker synchronization so deleted work does not reappear.
-- Keep credential delivery bound to the host's trusted store origins and owner-only credential custody.
+- Keep credential delivery bound to the host's trusted store origins and owner-only credential files.
 
-## [0.1.0] - 2026-10-07
+## 0.1.0 (2026-10-07)
 
 ### Added
 
 - One repository for both halves. The Go storage backend for `bd` lives in `bd/` as the module
-  `github.com/kombifyio/beads-cloudflare/bd` (its history is kept), released with the store under one version; its Go
-  version tags are `bd/vX.Y.Z` next to the plain `vX.Y.Z`.
+  `github.com/kombifyio/beads-cloudflare/bd`, released with the store under one version; its Go version tags are
+  `bd/vX.Y.Z` next to the plain `vX.Y.Z`.
 - `VERSION` is the single version. The store reports it as `x_store_version` (with `x_min_client_version`) in its context
   document; `bd` is stamped `<upstream>+cloudflare.<VERSION>` and, on the first request of a process, refuses a store it
   cannot work with, or a store that needs a newer `bd`, with one line naming both versions and the command that fixes it.
@@ -421,14 +375,13 @@ Notes cover changes after VERSION 0.1.0 (06acb22d314c6d64774c50c364c356660f0482a
 - A setup tool, runnable straight from the repository: `npx --yes github:kombifyio/beads-cloudflare setup | join | doctor
   | uninstall`. `setup` deploys the store into your Cloudflare account and joins the current repository; `join` installs
   the matching `bd` (checksum verified), stores the key owner-only and writes `.beads/`; `doctor` runs a create, read,
-  close and delete round trip in a scratch tracker. Every command is idempotent and supports `--dry-run`. It replaces
-  `scripts/install.mjs`.
+  close and delete round trip in a scratch tracker. Every command is idempotent and supports `--dry-run`.
 - `SETUP.md`, one page for a coding agent to follow literally.
 - One CI for the pair: Worker typecheck and tests, Go vet, tests and stub check, and a pair proof that builds `bd` from the
   pull request, runs the Worker locally with workerd and runs the smoke script and the upstream conformance suite against it
   (baseline 52 pass / 8 fail of 60 checks).
-- One release lane (Publish OSS): the exported tree must pass the pair proof on its own; it publishes one release commit,
-  the tags `vX.Y.Z` and `bd/vX.Y.Z` on it, and five `bd` binaries with `SHA256SUMS`.
+- One release lane: the exported tree must pass the pair proof on its own; each release is one commit with the tags
+  `vX.Y.Z` and `bd/vX.Y.Z` on it, and five `bd` binaries with `SHA256SUMS`.
 
 ### Changed
 

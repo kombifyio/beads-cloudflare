@@ -32,6 +32,8 @@ export interface ArchiveResult {
   journalHead: number;
   accounted: number;
 }
+/** The tracker was written while it was being read: contention, retryable, nothing was archived. */
+export class SnapshotChangedError extends Error {}
 export const SNAPSHOT_FORMAT: string;
 export const SNAPSHOT_FORMAT_V2: string;
 export const SNAPSHOT_PART_FORMAT: string;

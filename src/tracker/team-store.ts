@@ -1,9 +1,11 @@
+import { WRITE_SETTLEMENT_SCHEMA, governedReplay, recordGovernedWrite, writeSettlement } from "./write-settlement";
 import { advanceOperation, createOperation, inspectOperation, listOperations, operationChunk } from "./operations";
 import { changes, type ChangesParams } from "./changes";
 import { analysis, type AnalysisParams } from "./analysis";
 // One Durable Object per team. The Worker decides who may call; this object runs each mutation as
 // one synchronous transaction: invariant checks, the change, its events and the idempotency receipt.
 import { DurableObject } from "cloudflare:workers";
+import type { MergePermit } from "../auth/merge-close";
 import { trackerAllowed, type Principal } from "../auth/scopes";
 import { addDependencies, removeDependency } from "./edges";
 import { listEvents, type Ctx } from "./events";
@@ -46,7 +48,9 @@ export type ReadOp =
 /** Everything an operation needs; the principal is the verified identity the Worker passes in. */
 export interface Call {
   tracker: string;
+  operationId?: string;
   principal: Principal;
+  mergePermit?: MergePermit;
   /** Path id (issue id, memory key). */
   id?: string;
   /** Request body of a write, as parsed JSON. */
@@ -89,6 +93,7 @@ export class TeamStore extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    this.sql.exec(WRITE_SETTLEMENT_SCHEMA);
     // SCHEMA only creates missing tables; an object that predates a new column
     // keeps the old shape. See COLUMN_MIGRATIONS for why that is not theoretical.
     migrateColumns(this.sql);
@@ -143,7 +148,11 @@ export class TeamStore extends DurableObject<Env> {
     // Hashing is async in workerd, so id candidates are prepared before the synchronous transaction.
     try {
       if (op === "advanceOperation" && call.idem) {
-        const replay = this.ctx.storage.transactionSync(() => this.replayReceipt(call, now));
+        const replay = this.ctx.storage.transactionSync(() => {
+          const found = this.replayReceipt(call, now);
+          if (found) recordGovernedWrite(this.sql, call, found);
+          return found;
+        });
         if (replay) {
           this.meter.write(Date.now() - started);
           return replay;
@@ -338,7 +347,13 @@ export class TeamStore extends DurableObject<Env> {
     }
   }
 
+  settleWrite(call: Call, seal = false): Out {
+    return this.ctx.storage.transactionSync(() => writeSettlement(this.sql, call, seal));
+  }
+
   private replayReceipt(call: Call, now: string): Out | undefined {
+    const governed = governedReplay(this.sql, call);
+    if (governed) return governed;
     const { principal, idem } = call;
     if (idem) {
       // An expired receipt must not replay: drop it, inside this transaction, before the lookup.
@@ -370,10 +385,10 @@ export class TeamStore extends DurableObject<Env> {
   private runWrite(op: WriteOp, call: Call, now: string, candidates: string[][]): Out {
     const { principal, idem } = call;
     const replay = this.replayReceipt(call, now);
-    if (replay) return replay;
+    if (replay) { recordGovernedWrite(this.sql, call, replay); return replay; }
 
     const startHead = this.sql.exec<{ head: number }>("SELECT COALESCE(MAX(seq), 0) AS head FROM events WHERE tracker = ?", call.tracker).one().head;
-    const ctx: Ctx = { sql: this.sql, tracker: call.tracker, actor: principal.email, principal: principal.sub, agent: call.agent, preserveProvenance: call.preserveProvenance, now };
+    const ctx: Ctx = { sql: this.sql, tracker: call.tracker, actor: principal.email, principal: principal.sub, agent: call.agent, mergePermit: call.mergePermit, preserveProvenance: call.preserveProvenance, now };
     const out = this.dispatch(op, ctx, call, candidates);
     if (out.status < 400) {
       const revision = advanceTrackerRevision(this.sql, call.tracker);
@@ -386,6 +401,7 @@ export class TeamStore extends DurableObject<Env> {
       }
     }
 
+    recordGovernedWrite(this.sql, call, out);
     if (idem) {
       this.sql.exec(
         "INSERT INTO receipts (principal, key, request_hash, status, body, etag, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

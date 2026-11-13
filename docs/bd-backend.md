@@ -33,12 +33,12 @@ the release's `SHA256SUMS` and installs it. The release carries `bd_<os>_<arch>.
 arm64) and `bd_windows_amd64.zip`. To build one yourself, with one script:
 
 ```sh
-bash scripts/build-bd.sh v1.3.1 ./bd
+bash scripts/build-bd.sh v1.3.4 ./bd
 ```
 
 The script clones the given upstream Beads tag, adds one file (`cmd/bd/zz_backend_cloudflare.go`, the blank import
 above), wires the `bd/` module in and builds with `CGO_ENABLED=0 -tags gms_pure_go`. The binary is stamped
-`1.3.1+cloudflare.<VERSION>`, where `VERSION` is the file at the repository root, which is also the version the store
+`1.3.4+cloudflare.<VERSION>`, where `VERSION` is the file at the repository root, which is also the version the store
 reports. No upstream source is patched. By default the module is replaced with the `bd/` directory of the checkout the
 script lives in, so a build needs no published version; set `ADAPTER_VERSION=v0.1.0` to require a published version of
 the module instead. `UPSTREAM_REPO` points the script at another clone or mirror of upstream. The module builds with
@@ -96,10 +96,10 @@ it tries a new exchange but keeps the held credential until expiry when GitHub r
 The credential's tracker and scopes are set by server policy, never client choices. Credentials never appear in
 errors, and redirects and oversized responses are refused. The backend uses a 10-second identity deadline and
 a 15-second exchange deadline. A missing or malformed expiry forces refresh; cached keys from another repository
-or tracker are never reused. Static agent-key custody stays supported and takes precedence. The native backend
+or tracker are never reused. A static agent key stays supported and takes precedence. The native backend
 captures host identity, trusted origins, config location, gh executable/environment and HTTPS trust before upstream
 loads checkout `.beads/.env`. That checkout file can supply its own static key, but cannot grant host trust or redirect
-the host's GitHub credential custody. `token_env` only accepts `BEADS_CLOUDFLARE_TOKEN` or
+the host's GitHub credential. `token_env` only accepts `BEADS_CLOUDFLARE_TOKEN` or
 `BEADS_CLOUDFLARE_*_TOKEN`, and an ambient Beads key needs a host-trusted origin or startup
 `BEADS_CLOUDFLARE_BASE` pairing. Repository configuration cannot alias another host credential such as `GH_TOKEN`.
 
@@ -120,7 +120,7 @@ Cache updates lock a fully written PID/nonce record and atomically replace the f
 a crashed holder is reclaimed only when its PID is proven dead. Unix permissions and Windows DACLs protect both
 credential confidentiality and host trust integrity. `bootstrap` acquires credentials and installs the matching
 binary without rewriting repository files. `credentials` is the auth-only interface for migration callers;
-`credentials --json` returns secret material for a capturing custody process and must never be logged.
+`credentials --json` returns secret material for a process that captures it and must never be logged.
 `doctor` defaults to read-only authenticated context; its optional scratch probe needs a separate credential
 authorized for scratch trackers. See [the complete setup flow](../SETUP.md#portable-github-authorization).
 
@@ -138,10 +138,14 @@ uncertain outcome before starting another logical operation. HTTP context
 `x_identity` reports the credential principal separately from the native actor;
 issue `x_claim` reports claim identity, expiry and fencing.
 
-A former `.beads/dolt` directory can make upstream bd refuse a legacy workspace.
-Archive its retained database and history privately, verify readback and native
-readability, then remove the authorized retired storage. Do not bypass that
-refusal with `.local_version`. The governed bootstrap disables upstream automatic
+A `.beads` directory that holds an existing Beads workspace (a Dolt database, a
+legacy `issues.jsonl` or a `metadata.json` without `"backend": "cloudflare"`) is
+not joined over. `npx --yes beads-cloudflare migrate <store url>` moves it into a
+tracker: it exports the issues with an upstream `bd` that can read them
+(`--upstream-bd`, or `--from <file.jsonl>` for an existing export), moves `.beads`
+aside to `.beads.backup-<time>`, joins the store, imports the export and compares
+the counts. Nothing in the old workspace is deleted. Do not bypass the refusal
+with `.local_version`. The governed bootstrap disables upstream automatic
 JSONL import/export and local commits in `config.yaml`; historical exports never
 silently populate an empty Cloudflare tracker.
 
@@ -294,7 +298,7 @@ The proposal to fix the first one upstream is in
 ## Conformance
 
 Beads ships a conformance suite for out-of-tree backends. Measured against a local
-store (`wrangler dev`) with Beads `v1.3.1`:
+store (`wrangler dev`) with Beads `v1.3.4`:
 
 - **Unsupported contract: every declared refusal passes.**
 - **Portable raw surface (`RunAll`): 52 pass, 8 fail** of 60 checks.

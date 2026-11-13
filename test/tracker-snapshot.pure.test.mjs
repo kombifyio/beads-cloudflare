@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { assertEmptyDestination, main, parseSnapshot, readSnapshotFile, restoreBatches, sealSnapshot, snapshotPartPath, verifySnapshot, writePrivateSnapshot } from "../scripts/tracker-snapshot.mjs";
 import { credentialFilePrivate } from "../cli/github-auth.mjs";
-import { archiveSnapshot, captureSnapshot, expiredSnapshotKeys, readStateParts, SNAPSHOT_EXCLUSIONS, SNAPSHOT_FORMAT, SNAPSHOT_FORMAT_V2 } from "../src/tracker/snapshot-core.mjs";
+import { archiveSnapshot, captureSnapshot, expiredSnapshotKeys, readStateParts, SnapshotChangedError, SNAPSHOT_EXCLUSIONS, SNAPSHOT_FORMAT, SNAPSHOT_FORMAT_V2 } from "../src/tracker/snapshot-core.mjs";
 
 const sha256 = async text => createHash("sha256").update(text).digest("hex");
 const byteLength = text => Buffer.byteLength(text);
@@ -174,8 +174,45 @@ test("writes no manifest when the tracker changes or a part upload fails", async
     emit: async item => { if (written.length === 1) throw new Error("upload failed"); written.push(item.name); },
     abort: async names => removed.push(...names),
   })), /upload failed/);
-  assert.deepEqual(removed, written);
+  // The part whose upload failed is removed as well: R2 may have committed it before the error reached the caller.
+  assert.deepEqual(removed, [...written, "part-00001.json"]);
   assert.equal(removed.includes("manifest"), false);
+});
+
+test("removes a manifest whose upload failed after it may have committed", async () => {
+  const removed = [];
+  await assert.rejects(archiveSnapshot(fixture({ events: 12, actor: "a".repeat(40) }), "source", archiveOptions(null, {
+    residentBytes: 80, partBytes: 70,
+    emit: async item => { if (item.role === "manifest") throw new Error("put: internal error (10001)"); },
+    abort: async names => removed.push(...names),
+  })), /10001/);
+  assert.equal(removed.at(-1), "manifest");
+  assert.ok(removed.length > 1);
+});
+
+test("reports a write during the read as contention and reads a large tracker twice, not three times", async () => {
+  const contexts = [];
+  const counted = inner => async (tracker, suffix) => { if (suffix === "/context") contexts.push(suffix); return inner(tracker, suffix); };
+  const quiet = await archiveSnapshot(counted(fixture({ events: 12, actor: "a".repeat(40) })), "source", archiveOptions(null, { residentBytes: 80, partBytes: 70, emit: async () => {} }));
+  assert.equal(quiet.format, SNAPSHOT_FORMAT_V2);
+  assert.equal(contexts.length, 4, "a v2 archive is two reads, each bracketed by a context request");
+  // The revision moves during the second read, after every part was uploaded: no manifest, and every part is named for removal.
+  const written = [];
+  const removed = [];
+  await assert.rejects(archiveSnapshot(fixture({ events: 12, actor: "a".repeat(40), mutate: { context: (context, passes) => ({ ...context, x_mutation_revision: passes > 1 ? 9 : context.x_mutation_revision }) } }), "source", archiveOptions(null, {
+    residentBytes: 80, partBytes: 70, emit: async item => { written.push(item.name); }, abort: async names => removed.push(...names),
+  })), error => error instanceof SnapshotChangedError && /tracker changed during snapshot/.test(error.message));
+  assert.ok(written.length > 1);
+  assert.deepEqual(removed, written);
+  assert.equal(written.includes("manifest"), false);
+  // A part that differs between the two reads is contention too, and its upload never happens.
+  const uploaded = [];
+  await assert.rejects(archiveSnapshot(fixture({ mutate: { issue: (issue, passes) => passes > 1 ? { ...issue, title: "changed" } : issue } }), "source", archiveOptions(null, {
+    residentBytes: 80, partBytes: 70, emit: async item => { uploaded.push(item.name); },
+  })), error => error instanceof SnapshotChangedError);
+  assert.deepEqual(uploaded, []);
+  // A failure that is not contention stays a plain error, so callers do not retry it as if a writer were in the way.
+  await assert.rejects(archiveSnapshot(fixture(), "source", archiveOptions(null, { emit: async () => { throw new Error("upload failed"); } })), error => !(error instanceof SnapshotChangedError));
 });
 
 test("reads a private v2 manifest from its sibling part directory", async () => {

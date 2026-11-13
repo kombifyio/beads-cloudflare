@@ -157,7 +157,15 @@ async function exchangeGithubCredential({ origin, repository, tracker, env, fetc
   try {
     response = await fetchImpl(`${origin}/auth/github`, { method: "POST", headers: { Authorization: `Bearer ${identity}`, "Content-Type": "application/json" }, body: JSON.stringify({ repository, tracker }), redirect: "error", signal: AbortSignal.timeout(15_000) });
   } catch { throw new Error("GitHub credential exchange failed (network, timeout or redirect)"); }
-  if (!response.ok) throw new Error(`GitHub credential exchange refused (HTTP ${response.status}); check repository access and the server's repository-to-tracker policy`);
+  if (!response.ok) {
+    // A refusal is the store's policy decision, not proof of a revoked login: an Actions OIDC token or a valid but
+    // unadmitted user token is refused the same way. The store's text names the refused claim (never the policy's
+    // values) and the binding to edit, so it is shown, reduced to printable ASCII.
+    let said = "";
+    try { const problem = await boundedJson(response); if (typeof problem?.detail === "string") said = ` Store says: ${problem.detail.split(identity).join("[identity]").replace(/[^\x20-\x7e]/g, " ").slice(0, 400)}`; } catch { /* Body unreadable: the status stays. */ }
+    const kind = identity.split(".").length === 3 ? "this GitHub Actions identity" : "this GitHub identity";
+    throw new Error(`GitHub credential exchange refused (HTTP ${response.status}): the store did not admit ${kind}; check repository access, the repository-to-tracker policy and, for Actions runs, the workflow named in the repository's oidc policy.${said}`);
+  }
   let entry;
   try { entry = await boundedJson(response); } catch { throw new Error("GitHub exchange returned an invalid response"); }
   if (typeof entry.token !== "string" || !/^[!-~]+$/.test(entry.token) || !githubCredentialFresh(entry, now)) throw new Error("GitHub exchange returned an invalid or expired credential");

@@ -1,7 +1,7 @@
 # Semantics ported from upstream Beads
 
-Every rule below was read from the Go code of upstream Beads `v1.3.1`
-(`c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c`), not from the spec prose. Paths are relative to the
+Every rule below was read from the Go code of upstream Beads `v1.3.4`
+(`7ef2fd05eb0cd3bdbde051f93cfc14ccf270cdde`), not from the spec prose. Paths are relative to the
 upstream repository root; where the Go code and the spec disagree, the Go code is followed and the
 disagreement is noted. Our implementation lives in `src/tracker/`.
 
@@ -68,7 +68,7 @@ gathered edges. The verdict is independent of candidate order and equals the who
   `created_at ASC, id ASC`; `hybrid`: rows created in the last 48 hours first, by priority, then older
   rows by age (`sqlbuild/ready.go:51-69`).
 - `limit` absent means 100; the page fetches `limit+1` rows and sets `has_more` (`workapi/ready.go:16-28`,
-  `domain/db/issue_search.go:807-839`). There is no cursor on the ready listing.
+  `domain/db/issue_search.go:817-849`). There is no cursor on the ready listing.
 - `limit=0` (unlimited) is refused with `400 invalid_argument` on this server, as upstream does when
   bound beyond loopback (`reads.go:547-555`).
 - Items are `IssueWithCounts` (`internal/types/types.go:1139-1145`): `dependency_count` counts the

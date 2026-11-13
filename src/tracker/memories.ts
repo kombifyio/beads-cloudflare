@@ -27,15 +27,20 @@ export function keyParam(key: string): string {
   return key;
 }
 
+/** Strips leading and trailing runs of one character in a single linear pass (no backtracking). */
+function trimChar(text: string, char: string, ends: "both" | "end" = "both"): string {
+  let start = 0, end = text.length;
+  if (ends === "both") while (start < end && text[start] === char) start++;
+  while (end > start && text[end - 1] === char) end--;
+  return text.slice(start, end);
+}
+
 /** Derives a key from content when none is given: upstream internal/memoryapi ResolveKey. */
 function deriveKey(content: string): string {
-  const slug = content
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const slug = trimChar(content.toLowerCase().replace(/[^a-z0-9]+/g, "-"), "-");
   const joined = slug.split("-").slice(0, 8).join("-");
   const bytes = new TextEncoder().encode(joined).slice(0, 60);
-  const key = new TextDecoder().decode(bytes).replace(/�+$/, "").replace(/-+$/, "");
+  const key = trimChar(trimChar(new TextDecoder().decode(bytes), "\uFFFD", "end"), "-", "end");
   if (key === "") throw invalid(undefined, "validation failed: could not generate key from content; use a key to specify one");
   return key;
 }

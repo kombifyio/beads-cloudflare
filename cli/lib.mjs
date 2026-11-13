@@ -1,11 +1,28 @@
-// Pure parts of the setup CLI: no network, no file system, no processes. Everything here is
-// unit-tested in lib.test.mjs; commands.mjs does the effects.
+// Pure parts of the setup CLI: no network, no file system, no processes. commands.mjs and the
+// other command modules do the effects; the CLI's behaviour is exercised end to end against a
+// local store (see README, "Try it locally").
 import { createHash } from "node:crypto";
 import { join, win32 } from "node:path";
 
 export const PUBLIC_REPO = "kombifyio/beads-cloudflare";
-export const MIN_NODE_MAJOR = 22;
 export const MAX_TRACKER_ID = 40;
+
+// ---------------------------------------------------------------- node
+
+/**
+ * The supported Node releases, the same set package.json `engines` names. The deploy tooling (`cf`) requires one of these
+ * release lines; the CLI holds every command to the same rule so that there is one minimum to state.
+ */
+export const NODE_REQUIREMENT = "Node 22.23 or later on the 22 line, 24.22 or later on the 24 line, or 26.12 or later";
+
+/** Null when a Node version (process.versions.node) is supported, else the reason. */
+export function nodeProblem(version) {
+  const parsed = parseVersion(version);
+  if (!parsed) return `cannot read the Node version "${version}"`;
+  const { major, minor } = parsed;
+  const ok = (major === 22 && minor >= 23) || (major === 24 && minor >= 22) || (major === 26 && minor >= 12) || major > 26;
+  return ok ? null : `Node ${version} is not supported; this tool needs ${NODE_REQUIREMENT}`;
+}
 
 // ---------------------------------------------------------------- versions
 
@@ -258,16 +275,37 @@ export function parseDotEnv(text) {
 
 // ---------------------------------------------------------------- cf (the Cloudflare CLI)
 
-/** Parses what cf printed: JSON, possibly after a banner line. Undefined when there is none. */
+/**
+ * Parses what cf printed: the first JSON object or list, possibly after a banner line and before trailing hint lines
+ * (cf prints advice after its JSON). Undefined when there is none.
+ */
 export function parseCfJson(text) {
   const source = String(text ?? "");
   const start = source.search(/[[{]/);
   if (start < 0) return undefined;
-  try {
-    return JSON.parse(source.slice(start));
-  } catch {
-    return undefined;
+  let depth = 0;
+  let quoted = false;
+  for (let i = start; i < source.length; i++) {
+    const c = source[i];
+    if (quoted) {
+      if (c === "\\") i++;
+      else if (c === '"') quoted = false;
+      continue;
+    }
+    if (c === '"') quoted = true;
+    else if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(source.slice(start, i + 1));
+        } catch {
+          return undefined;
+        }
+      }
+    }
   }
+  return undefined;
 }
 
 /**
@@ -301,7 +339,7 @@ export function readDeployedSettings(version) {
   const bindings = Array.isArray(version?.bindings) ? version.bindings : [];
   const text = (name) => bindings.find((b) => b?.name === name && b.type === "plain_text" && typeof b.text === "string")?.text;
   const kv = bindings.find((b) => b?.name === "OAUTH_KV");
-  const found = { version: version?.number, origin: text("PUBLIC_ORIGIN"), adminEmails: text("ADMIN_EMAILS"), accessIssuer: text("ACCESS_ISSUER"), githubRepositories: text("GITHUB_REPOSITORIES"), githubReadApp: text("GITHUB_READ_APP"), kvId: kv?.namespace_id ?? kv?.id };
+  const found = { version: version?.number, origin: text("PUBLIC_ORIGIN"), adminEmails: text("ADMIN_EMAILS"), accessIssuer: text("ACCESS_ISSUER"), githubRepositories: text("GITHUB_REPOSITORIES"), githubReadApp: text("GITHUB_READ_APP"), githubMergeCloser: text("GITHUB_MERGE_CLOSER"), githubWorkflowGrants: text("GITHUB_WORKFLOW_GRANTS"), kvId: kv?.namespace_id ?? kv?.id };
   const missing = [];
   if (!Array.isArray(version?.bindings)) missing.push("bindings");
   for (const [field, key] of [["PUBLIC_ORIGIN", "origin"], ["ADMIN_EMAILS", "adminEmails"], ["ACCESS_ISSUER", "accessIssuer"], ["OAUTH_KV", "kvId"]]) if (found[key] === undefined) missing.push(field);
@@ -317,7 +355,7 @@ export function secretNamesOf(items) {
  * The values the project's cloudflare.config.ts reads from the environment. Nothing else about the deployment is variable,
  * so this is the whole contract between the setup tool and the deploy configuration.
  */
-export function deployEnv({ name, kvId, origin, adminEmails, accessIssuer, accessSecrets, githubRepositories, githubReadApp, accountId }) {
+export function deployEnv({ name, kvId, origin, adminEmails, accessIssuer, accessSecrets, githubRepositories, githubReadApp, githubMergeCloser, githubWorkflowGrants, accountId }) {
   return {
     BEADS_WORKER_NAME: name,
     BEADS_KV_ID: kvId,
@@ -327,6 +365,151 @@ export function deployEnv({ name, kvId, origin, adminEmails, accessIssuer, acces
     BEADS_ACCESS_SECRETS: accessSecrets ? "1" : "",
     BEADS_GITHUB_REPOSITORIES: githubRepositories ?? "{}",
     BEADS_GITHUB_READ_APP: githubReadApp ?? "",
+    BEADS_GITHUB_MERGE_CLOSER: githubMergeCloser ?? "",
+    BEADS_GITHUB_WORKFLOW_GRANTS: githubWorkflowGrants ?? "",
     ...(accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {}),
   };
+}
+
+// ---------------------------------------------------------------- caches
+
+/** The per-user cache directory: deploy tooling and downloads that can be fetched again. */
+export function cacheDir(platform, env, home) {
+  if (platform === "win32") return win32.join(env.LOCALAPPDATA ?? win32.join(home, "AppData", "Local"), "beads-cloudflare", "cache");
+  if (platform === "darwin") return join(home, "Library", "Caches", "beads-cloudflare");
+  return join(env.XDG_CACHE_HOME || join(home, ".cache"), "beads-cloudflare");
+}
+
+// ---------------------------------------------------------------- repository files
+
+/**
+ * .beads/.gitignore. Only the configuration files are committed. The explicit patterns are the ones upstream `bd doctor`
+ * looks for by name; the leading `*` already covers them, they are listed so that `bd doctor` does not call the file outdated.
+ */
+export const BEADS_GITIGNORE = `# Written by beads-cloudflare. Only the configuration files are meant to be committed;
+# everything else bd keeps here is local to this clone (and .env may hold a credential).
+*.db?*
+.env
+redirect
+last-touched
+bd.sock.startlock
+.sync.lock
+*.gate.lock*
+export-state/
+export-state.json
+last_pull
+dolt/
+embeddeddolt/
+proxieddb/
+ephemeral.sqlite3
+dolt-server.pid
+dolt-server.log
+dolt-server.lock
+dolt-server.port
+dolt-server.activity
+dolt-server-config.yaml
+daemon.*
+*.lock
+*.corrupt.backup/
+.beads-credential-key
+proxied_server_client_info.json
+.local_version
+backup/
+*
+!.gitignore
+!metadata.json
+!cloudflare.json
+`;
+
+// ---------------------------------------------------------------- agent wiring
+
+export const AGENT_NAMES = ["claude", "codex"];
+
+/** Parses --agents: a comma list of known agents, "none" or empty. Returns { agents } or { problem }. */
+export function parseAgents(value) {
+  const items = String(value ?? "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  if (items.length === 1 && items[0] === "none") return { agents: [] };
+  const unknown = items.find((item) => !AGENT_NAMES.includes(item));
+  if (unknown) return { problem: `"${unknown.slice(0, 20)}" is not a known agent; use ${AGENT_NAMES.join(", ")} or none` };
+  return { agents: [...new Set(items)] };
+}
+
+const BLOCK_START = "<!-- beads-cloudflare:start -->";
+const BLOCK_END = "<!-- beads-cloudflare:end -->";
+
+/** The instruction block for AGENTS.md / CLAUDE.md. */
+export function agentInstructions() {
+  return `${BLOCK_START}
+## Issue tracking
+
+This repository tracks its work with Beads (\`bd\`) in a shared Cloudflare store; every machine and agent sees the same issues.
+
+- Find work: \`bd ready\`. Read one: \`bd show <id>\`.
+- Take it before you start: \`bd update <id> --claim\`. Finish it: \`bd close <id> -r "<what was done>"\`.
+- New work: \`bd create "<title>" -t task|bug|feature -p 0-4\`; link with \`bd dep add <id> <depends-on>\`.
+- Add \`--json\` for machine-readable output. Do not run \`bd init\` and do not edit \`.beads/\` by hand.
+${BLOCK_END}
+`;
+}
+
+/** Puts the block into a Markdown file's text: replaces an earlier copy between the markers, else appends it. */
+export function upsertMarkedBlock(text, block) {
+  const source = String(text ?? "");
+  const start = source.indexOf(BLOCK_START);
+  const end = source.indexOf(BLOCK_END);
+  if ((start >= 0) !== (end > start)) return { problem: "the beads-cloudflare block markers are incomplete; fix or remove them, the file was left unchanged" };
+  if (start >= 0 && end > start) return source.slice(0, start) + block.trimEnd() + source.slice(end + BLOCK_END.length);
+  if (!source.trim()) return block;
+  return `${source.replace(/\s*$/, "")}\n\n${block}`;
+}
+
+/** The stdio MCP server entry: the CLI bridges stdio to the store's /mcp with the credential bd uses. */
+export function mcpCommand(version, base, platform = process.platform) {
+  const args = ["-y", `beads-cloudflare@${version}`, "mcp", "--store", base];
+  // On Windows npx is npx.cmd, which agents can start only through cmd.exe.
+  return platform === "win32" ? { command: "cmd", args: ["/c", "npx", ...args] } : { command: "npx", args };
+}
+
+/** Adds or replaces the "beads" server in a .mcp.json document; other servers are kept. Returns { document } or { problem }. */
+export function withClaudeMcp(text, entry) {
+  let document = {};
+  if (String(text ?? "").trim()) {
+    try {
+      document = JSON.parse(text);
+    } catch {
+      return { problem: ".mcp.json is not valid JSON; it was left unchanged" };
+    }
+    if (!document || typeof document !== "object" || Array.isArray(document)) return { problem: ".mcp.json is not a JSON object; it was left unchanged" };
+  }
+  const servers = document.mcpServers && typeof document.mcpServers === "object" ? document.mcpServers : {};
+  return { document: { ...document, mcpServers: { ...servers, beads: { type: "stdio", ...entry } } } };
+}
+
+const tomlString = (value) => JSON.stringify(String(value));
+
+/**
+ * Adds or replaces the [mcp_servers.beads] table in a Codex config.toml; everything else is kept byte for byte.
+ * Returns the new text.
+ */
+export function withCodexMcp(text, entry) {
+  const table = `[mcp_servers.beads]\ncommand = ${tomlString(entry.command)}\nargs = [${entry.args.map(tomlString).join(", ")}]\n`;
+  const lines = String(text ?? "").split(/\r?\n/);
+  const out = [];
+  let skipping = false;
+  for (const line of lines) {
+    const header = /^\s*\[([^\]]+)\]\s*(#.*)?$/.exec(line)?.[1]?.trim();
+    if (header !== undefined) skipping = header === "mcp_servers.beads" || header.startsWith("mcp_servers.beads.");
+    if (!skipping) out.push(line);
+  }
+  const kept = out.join("\n").replace(/\s*$/, "");
+  return kept ? `${kept}\n\n${table}` : table;
+}
+
+/** The shell profile and the line that put a directory on PATH, for the user's login shell. Undefined when unknown. */
+export function profileLine(dir, shell, home) {
+  const name = String(shell ?? "").split(/[\\/]/).pop();
+  if (name === "zsh") return { file: join(home, ".zshrc"), line: `export PATH="${dir}:$PATH"` };
+  if (name === "bash") return { file: join(home, ".bashrc"), line: `export PATH="${dir}:$PATH"` };
+  if (name === "fish") return { file: join(home, ".config", "fish", "config.fish"), line: `fish_add_path "${dir}"` };
+  return undefined;
 }

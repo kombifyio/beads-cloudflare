@@ -2,13 +2,19 @@
 // per-user and per-repository files, and the self-test. Pure decisions live in lib.mjs.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { redact, registerSecret } from "./output.mjs";
 import { ambientBeadsStoreTrusted, beadsTokenEnvValid, credentialFilePrivate, credentialFresh, exchangeOrigin, githubCredentialKey, readGithubCredentials, repositoryValid, resolveGithubCredential, updateCredentialFile } from "./github-auth.mjs";
+import { PACKAGE_ROOT, TESTED_CF, cfAgainstTested, cfLauncherFor, deployPins, ensureToolchain } from "./toolchain.mjs";
+import { wireAgents } from "./agents.mjs";
 import {
-  MIN_NODE_MAJOR,
+  BEADS_GITIGNORE,
+  NODE_REQUIREMENT,
+  nodeProblem,
+  parseAgents,
+  profileLine,
   emailListProblem,
   httpsUrlProblem,
   isShim,
@@ -19,7 +25,6 @@ import {
   PUBLIC_REPO,
   backendVersionOf,
   checksumProblem,
-  compareSemver,
   compareVersions,
   configDir,
   defaultBinDir,
@@ -41,24 +46,96 @@ import {
   withoutCredential,
 } from "./lib.mjs";
 
-const PACKAGE_ROOT = resolve(import.meta.dirname, "..");
 const PACKAGE = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
 export const CLI_VERSION = PACKAGE.version;
-const NPX = `npx --yes github:${PUBLIC_REPO}`;
+export const NPX = "npx --yes beads-cloudflare";
 const win = process.platform === "win32";
+
+/**
+ * A failure the user can act on: printed as a FAILED line with its fix lines, never as a stack trace. Every error a
+ * stranger can reach is one of these; anything else is a defect and is reported as one.
+ */
+export class Diagnosed extends Error {
+  constructor(label, message, fix) {
+    super(message);
+    this.label = label;
+    this.fix = fix;
+  }
+}
+
+/** True when a person can answer questions: both ends are a terminal and no CI marker is set. */
+export const interactive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY && !process.env.CI);
+
+/** Asks a yes/no question on the terminal. Returns the default when the answer is empty. */
+export async function askYesNo(question, fallback) {
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(`${question} ${fallback ? "[Y/n]" : "[y/N]"} `)).trim().toLowerCase();
+    return answer ? answer.startsWith("y") : fallback;
+  } finally {
+    rl.close();
+  }
+}
+
+/** Asks on the terminal for a line of text. */
+export async function askLine(question) {
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(`${question} `)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+/** Reads a secret from the terminal without echoing it. */
+export function askHidden(question) {
+  return new Promise((done, fail) => {
+    const input = process.stdin;
+    process.stdout.write(`${question} `);
+    let value = "";
+    const finish = (error) => {
+      input.setRawMode(false);
+      input.pause();
+      input.removeListener("data", onData);
+      process.stdout.write("\n");
+      if (error) fail(error);
+      else done(value.trim());
+    };
+    const onData = (chunk) => {
+      for (const char of chunk.toString("utf8")) {
+        if (char === "\r" || char === "\n") return finish();
+        if (char === "\u0003" || char === "\u0004") return finish(new Diagnosed("credential", "cancelled", "run the command again"));
+        if (char === "\u007f" || char === "\b") value = value.slice(0, -1);
+        else if (char >= " ") value += char;
+      }
+    };
+    input.setRawMode(true);
+    input.resume();
+    input.on("data", onData);
+  });
+}
 
 // ------------------------------------------------------------------ reporting
 
-class Report {
-  constructor(dryRun) {
+export class Report {
+  constructor(dryRun, rerun, { stderr = false } = {}) {
+    this.print = stderr ? console.error : console.log;
     this.dryRun = dryRun;
     this.failures = 0;
+    this.rerun = rerun;
+    this.notes = [];
+  }
+  /** A line printed after the final status line, such as the one command left to run. */
+  note(text) {
+    this.notes.push(text);
   }
   #row(tag, text) {
-    console.log(`  ${tag.padEnd(7)} ${redact(text)}`);
+    this.print(`  ${tag.padEnd(7)} ${redact(text)}`);
   }
   heading(text) {
-    console.log(`\n${redact(text)}`);
+    this.print(`\n${redact(text)}`);
   }
   ok(label, detail = "") {
     this.#row("ok", detail ? `${label}: ${detail}` : label);
@@ -77,19 +154,20 @@ class Report {
   /** Prints the last line of a command and returns its exit code. */
   finish(what, success = "beads-cloudflare: ready. Use bd as usual.") {
     if (this.failures === 0) {
-      console.log(`\n${this.dryRun ? "beads-cloudflare: dry run, nothing was changed." : success}`);
+      this.print(`\n${this.dryRun ? "beads-cloudflare: dry run, nothing was changed." : success}`);
+      for (const line of this.notes) this.print(redact(line));
       return 0;
     }
-    console.log(`\nbeads-cloudflare: FAILED (${this.failures} problem${this.failures === 1 ? "" : "s"} in ${what}). Apply the fix lines above, then run: ${NPX} doctor`);
+    this.print(`\nbeads-cloudflare: FAILED (${this.failures} problem${this.failures === 1 ? "" : "s"} in ${what}). Apply the fix lines above, then run again: ${this.rerun ?? `${NPX} ${what}`}`);
     return 1;
   }
 }
 
 // ------------------------------------------------------------------ locations and files
 
-const userConfigDir = () => configDir(process.platform, process.env, homedir());
-const credentialsPath = () => join(userConfigDir(), "beads-cloudflare", "credentials.json");
-const storeStatePath = (name) => join(userConfigDir(), "beads-cloudflare", "stores", `${name}.json`);
+export const userConfigDir = () => configDir(process.platform, process.env, homedir());
+export const credentialsPath = () => join(userConfigDir(), "beads-cloudflare", "credentials.json");
+export const storeStatePath = (name) => join(userConfigDir(), "beads-cloudflare", "stores", `${name}.json`);
 const binaryName = () => (win ? "bd.exe" : "bd");
 
 function readJsonFile(path) {
@@ -97,12 +175,12 @@ function readJsonFile(path) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    throw new Error(`${path} is not valid JSON; fix or delete it`);
+    throw new Diagnosed("file", `${path} is not valid JSON`, `fix or delete ${path}`);
   }
 }
 
 /** Writes a file only its owner can read: mode 600, or an owner-only access list on Windows. */
-function writePrivate(path, text) {
+export function writePrivate(path, text) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, text, { mode: 0o600 });
   if (!win) {
@@ -139,13 +217,14 @@ function sameFile(a, b) {
 
 // No command here ever goes through a shell: a shell would give every user-supplied value (a Worker name, a path) the power
 // of a command line. Programs are started directly with an argument array, and npx is started as a Node script.
-function run(command, args, { cwd, env, cleanEnv, input, timeout } = {}) {
+export function run(command, args, { cwd, env, cleanEnv, input, timeout, stdio } = {}) {
   const result = spawnSync(command, args, {
     cwd,
     encoding: "utf8",
     input,
     shell: false,
     timeout,
+    stdio,
     maxBuffer: 1 << 26,
     env: cleanEnv ?? { ...process.env, ...env },
   });
@@ -154,41 +233,11 @@ function run(command, args, { cwd, env, cleanEnv, input, timeout } = {}) {
 
 // ------------------------------------------------------------------ cf, the Cloudflare CLI
 
-const CF_NAMES = ["cf", "cloudflare"]; // `cloudflare` is the documented alias that avoids an unrelated `cf` on PATH
-const CF_BASE_ENV = { WRANGLER_SEND_METRICS: "false" }; // cf runs the project's pinned Wrangler inside `cf build` and `cf deploy`
-let cfLaunchers;
-
-/**
- * How to start each cf the system would find: [{ name, command, prefix }]. On Windows an npm install leaves cf.cmd, which only
- * cmd.exe can run; the script it points at is started with node directly, so no shell is involved. On POSIX the executable is
- * started as it is.
- */
-function cfLaunchersOnPath() {
-  if (cfLaunchers) return cfLaunchers;
-  const found = [];
-  for (const dir of String(process.env.PATH ?? process.env.Path ?? "").split(win ? ";" : ":").filter(Boolean)) {
-    for (const name of CF_NAMES) {
-      if (win) {
-        const shim = join(dir, `${name}.cmd`);
-        if (!existsSync(shim)) continue;
-        const beside = join(dir, "node_modules", "cf", "bin", "cf");
-        const named = /["%]dp0%?[\\/]+([^"%]+?[\\/]bin[\\/]cf)"/i.exec(readFileSync(shim, "utf8"))?.[1];
-        const script = existsSync(beside) ? beside : named && join(dir, named);
-        if (script && existsSync(script)) found.push({ name, command: process.execPath, prefix: [script] });
-      } else {
-        const file = join(dir, name);
-        try {
-          if (statSync(file).isFile() && (statSync(file).mode & 0o111) !== 0) found.push({ name, command: file, prefix: [] });
-        } catch {}
-      }
-    }
-  }
-  cfLaunchers = found;
-  return found;
-}
+const CF_BASE_ENV = { WRANGLER_SEND_METRICS: "false" }; // cf runs the pinned Wrangler inside `cf build` and `cf deploy`
 
 let cfLauncher;
 let cfEnv = {};
+let toolchainModules;
 
 /** Runs cf without a shell. `options.env` is added to the base environment. */
 function cf(args, { env, ...options } = {}) {
@@ -220,7 +269,7 @@ function cfPages(args, what) {
   return { items };
 }
 
-async function request(method, url, { token, body, timeoutMs = 20000 } = {}) {
+export async function request(method, url, { token, body, timeoutMs = 20000 } = {}) {
   registerSecret(token);
   // A read may meet a connection the other side already closed; it is safe to ask again.
   let answer;
@@ -255,10 +304,10 @@ const wait = (ms) => new Promise((done) => setTimeout(done, ms));
 
 // ------------------------------------------------------------------ preflight
 
-function checkNode(report) {
-  const major = Number(process.versions.node.split(".")[0]);
-  if (major < MIN_NODE_MAJOR) {
-    report.fail("Node", `${process.versions.node} is too old; this tool needs Node ${MIN_NODE_MAJOR} or newer`, "install a current Node LTS from https://nodejs.org and run the command again");
+export function checkNode(report) {
+  const problem = nodeProblem(process.versions.node);
+  if (problem) {
+    report.fail("Node", problem, "install a current Node LTS from https://nodejs.org and run the command again");
     return false;
   }
   report.ok("Node", process.versions.node);
@@ -275,77 +324,94 @@ async function checkNetwork(report) {
   return true;
 }
 
-/** The newest cf release on the npm registry: { version } or { error }. */
-async function newestCfRelease() {
-  const answer = await request("GET", "https://registry.npmjs.org/cf/latest", { timeoutMs: 15000 });
-  if (answer.status !== 200) return { error: answer.status ? `the npm registry answered HTTP ${answer.status}` : `the npm registry did not answer (${answer.error})` };
-  const version = answer.json?.version;
-  if (typeof version !== "string" || compareSemver(version, version) === null) return { error: "the npm registry's answer carries no `version` field" };
-  return { version };
+/**
+ * The deploy tooling and the Cloudflare CLI in it. Returns the node_modules directory, or undefined after reporting why not.
+ * With dryRun nothing is installed; a missing installation is reported as a step.
+ */
+export function prepareToolchain(report, { dryRun }) {
+  const tooling = ensureToolchain({ dryRun, log: (text) => report.info(text) });
+  if (tooling.problem) {
+    report.fail("deploy tooling", tooling.problem, tooling.fix);
+    return undefined;
+  }
+  if (tooling.wouldInstall) {
+    report.would(`install the deploy tooling (cf ${tooling.pins.cf}, wrangler ${tooling.pins.wrangler}; about 400 MB, once) into ${tooling.wouldInstall}`);
+    return undefined;
+  }
+  report.ok("deploy tooling", tooling.installed ? `installed in ${tooling.seconds} s (${tooling.modules})` : `cf ${tooling.pins.cf}, wrangler ${tooling.pins.wrangler} (${tooling.modules})`);
+  toolchainModules = tooling.modules;
+  return tooling.modules;
+}
+
+/** Runs the pinned cf (or BEADS_CLOUDFLARE_CF) with the terminal attached: `beads-cloudflare cf auth login` and the like. */
+export async function cfCommandPassThrough(flag, args) {
+  const report = new Report(false, `${NPX} cf ${args.join(" ")}`, { stderr: true });
+  const modules = prepareToolchain(report, { dryRun: false });
+  if (!modules) return report.finish("cf");
+  const chosen = cfLauncherFor(modules);
+  if (chosen.problem) {
+    report.fail("cf", chosen.problem, "unset BEADS_CLOUDFLARE_CF to use the tested cf");
+    return report.finish("cf");
+  }
+  const result = spawnSync(chosen.launcher.command, [...chosen.launcher.prefix, ...args], { stdio: "inherit", shell: false, env: { ...process.env, ...CF_BASE_ENV } });
+  return result.status ?? 1;
 }
 
 /**
- * The Cloudflare CLI: present, on its newest release and signed in. Returns { accountId } or undefined after reporting why not.
- * Everything this tool does in the Cloudflare account goes through cf, so a missing, old or signed-out cf is the first failure.
+ * The Cloudflare CLI: the tested version pinned in package.json (or BEADS_CLOUDFLARE_CF, with a warning when it differs), and
+ * signed in. Returns { accountId } or undefined after reporting why not. A dry run runs the same version and sign-in checks
+ * when the tooling is already installed; it never installs it and never opens a browser.
  */
-async function checkCloudflareCli(report, { allowOutdated }) {
-  const install = "npm install -g cf@latest";
+async function checkCloudflareCli(report, { dryRun }) {
   const again = `then run: ${NPX} setup`;
-  let version;
-  let selected;
-  const checked = new Set();
-  for (const launcher of cfLaunchersOnPath()) {
-    const identity = JSON.stringify([launcher.command, launcher.prefix]);
-    if (checked.has(identity)) continue;
-    checked.add(identity);
-    cfLauncher = launcher;
-    const said = cf(["--version"], { timeout: 60000 });
-    const line = `${said.stdout}\n${said.stderr}`.split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
-    if (said.status === 0 && compareSemver(line, line) !== null) {
-      if (!version || compareSemver(line, version) > 0) {
-        version = line;
-        selected = launcher;
-      }
-    }
-  }
-  // npx prepends its bundled cf to PATH. A current host installation must still
-  // repair an older package pin without requiring the package itself to update.
-  cfLauncher = selected;
-  if (!version) {
-    report.fail("cf", "the Cloudflare CLI (`cf`) was not found on PATH", [`install it: ${install}`, again]);
+  const modules = prepareToolchain(report, { dryRun });
+  if (!modules) return report.failures ? undefined : dryRun ? { accountId: process.env.CLOUDFLARE_ACCOUNT_ID, unchecked: true } : undefined;
+  const chosen = cfLauncherFor(modules);
+  if (chosen.problem) {
+    report.fail("cf", chosen.problem, "unset BEADS_CLOUDFLARE_CF to use the tested cf, or point it at an existing cf");
     return undefined;
   }
-  const newest = await newestCfRelease();
-  if (newest.error) {
-    if (allowOutdated) report.info(`cf ${version}: the newest release was not checked (${newest.error}); --allow-outdated-cf is set`);
-    else {
-      report.fail("cf version", `cannot tell whether cf ${version} is current: ${newest.error}`, ["check the network and run the command again", "offline, or behind a proxy that blocks npm, run it with --allow-outdated-cf"]);
-      return undefined;
-    }
-  } else if (compareSemver(version, newest.version) < 0) {
-    if (allowOutdated) report.info(`cf ${version} is older than the newest release ${newest.version}; --allow-outdated-cf is set`);
-    else {
-      report.fail("cf version", `cf ${version} is older than the newest release ${newest.version}`, [`update it: ${install}`, again, "offline, run it with --allow-outdated-cf"]);
-      return undefined;
-    }
-  } else report.ok("cf", `${version}, current`);
+  cfLauncher = chosen.launcher;
+  const said = cf(["--version"], { timeout: 60000 });
+  const version = `${said.stdout}\n${said.stderr}`.split("\n").map((l) => l.trim()).filter(Boolean).at(-1);
+  if (said.status !== 0 || !version) {
+    report.fail("cf", `the Cloudflare CLI did not start: ${cfProblem(said)}`, chosen.override ? "unset BEADS_CLOUDFLARE_CF to use the tested cf" : `remove the deploy tooling cache and run setup again (it reinstalls cf ${TESTED_CF()})`);
+    return undefined;
+  }
+  const relation = cfAgainstTested(version);
+  if (relation === "same") report.ok("cf", `${version} (the tested version)`);
+  else report.info(`note: cf ${version} from BEADS_CLOUDFLARE_CF is ${relation === "unknown" ? "not a version this tool can compare" : `${relation} than the tested ${TESTED_CF()}`}; if a step fails, unset BEADS_CLOUDFLARE_CF`);
 
-  const who = cf(["auth", "whoami"], { timeout: 60000 });
-  const info = readWhoami(who.stdout || who.stderr);
+  let info = readWhoami(cf(["auth", "whoami"], { timeout: 60000 }).stdout);
+  if (info.signedOut && !dryRun && !process.env.CLOUDFLARE_API_TOKEN && interactive()) {
+    report.info("cf is not signed in to Cloudflare; starting `cf auth login` (a browser opens once)");
+    run(cfLauncher.command, [...cfLauncher.prefix, "auth", "login"], { env: { ...CF_BASE_ENV, ...cfEnv }, stdio: "inherit" });
+    info = readWhoami(cf(["auth", "whoami"], { timeout: 60000 }).stdout);
+  }
   if (info.problem) {
-    report.fail("Cloudflare login", info.problem, [`this cf (${version}) prints a shape this tool does not know: update cf (${install}) and this tool, or report it`]);
+    // An unknown answer is not fatal: Cloudflare credentials in the environment still decide the account, and cf deploy checks them.
+    if (process.env.CLOUDFLARE_ACCOUNT_ID) {
+      report.info(`note: ${info.problem}; using CLOUDFLARE_ACCOUNT_ID`);
+      cfEnv = { CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID };
+      return { accountId: process.env.CLOUDFLARE_ACCOUNT_ID };
+    }
+    report.fail("Cloudflare login", info.problem, ["set CLOUDFLARE_ACCOUNT_ID to the account that should host the store", again]);
     return undefined;
   }
   if (info.signedOut) {
+    if (dryRun) {
+      report.would(`sign in to Cloudflare first: ${NPX} cf auth login`);
+      return { accountId: process.env.CLOUDFLARE_ACCOUNT_ID, unchecked: true };
+    }
     report.fail("Cloudflare login", "cf is not signed in to Cloudflare", [
-      `run: ${cfCommand("auth login")}   (a browser opens once)`,
+      `run: ${NPX} cf auth login   (a browser opens once)`,
       "or, without a browser, set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the environment",
       again,
     ]);
     return undefined;
   }
-  const chosen = process.env.CLOUDFLARE_ACCOUNT_ID;
-  if (!chosen && info.accounts.length > 1) {
+  const chosenAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (!chosenAccount && info.accounts.length > 1) {
     report.fail(
       "Cloudflare account",
       `this login can use ${info.accounts.length} accounts: ${info.accounts.map((a) => `${a.name ?? "?"} (${a.id})`).join(", ")}`,
@@ -353,9 +419,9 @@ async function checkCloudflareCli(report, { allowOutdated }) {
     );
     return undefined;
   }
-  const account = info.accounts.find((a) => a.id === chosen) ?? info.accounts[0];
-  if (chosen && account.id !== chosen) {
-    report.fail("Cloudflare account", `CLOUDFLARE_ACCOUNT_ID ${chosen} is not one of the accounts this login can use`, "set it to one of the accounts listed by: " + cfCommand("auth whoami"));
+  const account = info.accounts.find((a) => a.id === chosenAccount) ?? info.accounts[0];
+  if (chosenAccount && account.id !== chosenAccount) {
+    report.fail("Cloudflare account", `CLOUDFLARE_ACCOUNT_ID ${chosenAccount} is not one of the accounts this login can use`, `set it to one of the accounts listed by: ${NPX} cf auth whoami`);
     return undefined;
   }
   cfEnv = { CLOUDFLARE_ACCOUNT_ID: account.id };
@@ -366,7 +432,7 @@ async function checkCloudflareCli(report, { allowOutdated }) {
 // ------------------------------------------------------------------ the store
 
 /** Reads the store's context with a key. Returns { doc } or { problem } with the reason. */
-async function readContext(base, key, tracker) {
+export async function readContext(base, key, tracker) {
   const answer = await request("GET", `${base}/t/${tracker}/v0/beads/context`, { token: key });
   if (answer.status === 200 && answer.json) return { doc: answer.json };
   if (answer.status === 401) return { problem: "the store refused the key (HTTP 401)", refused: true, authenticationRejected: true };
@@ -375,7 +441,7 @@ async function readContext(base, key, tracker) {
   return { problem: `the store answered HTTP ${answer.status} to its context request` };
 }
 
-async function waitForStore(base, attempts = 45) {
+export async function waitForStore(base, attempts = 45) {
   for (let i = 0; i < attempts; i++) {
     const answer = await request("GET", `${base}/healthz`, { timeoutMs: 8000 });
     if (answer.status === 200) return true;
@@ -384,7 +450,7 @@ async function waitForStore(base, attempts = 45) {
   return false;
 }
 
-const firstLine = (text) => String(text).split("\n").map((l) => l.trim()).find(Boolean) ?? "no output";
+export const firstLine = (text) => String(text).split("\n").map((l) => l.trim()).find(Boolean) ?? "no output";
 const PLACEHOLDER_ORIGIN = /^https:\/\/[\w-]+\.example\.workers\.dev\/?$/; // what a first deploy carries before the real address is known
 
 /** Creates the KV namespace "<name>-oauth" through cf, or reuses the one of that title. Returns { id, reused } or undefined. */
@@ -440,26 +506,15 @@ function inspectWorker(name) {
   return { exists: true, origin, deployed, secrets: secretNamesOf(names.items) };
 }
 
-/** The node_modules directory that holds this package's dependencies (wrangler, cf, the Worker's libraries): its own, or the one an npx install hoists them to. */
-function dependencyDir() {
-  const candidates = [join(PACKAGE_ROOT, "node_modules")];
-  for (let dir = dirname(PACKAGE_ROOT); ; dir = dirname(dir)) {
-    candidates.push(basename(dir) === "node_modules" ? dir : join(dir, "node_modules"));
-    if (dirname(dir) === dir) break;
-  }
-  return candidates.find((dir) => existsSync(join(dir, "wrangler", "package.json")) && existsSync(join(dir, "cf", "package.json")));
-}
-
 /**
- * A throwaway project for `cf deploy`: the deploy configuration and the Worker source copied out of this package, and a link to
- * its dependencies. cf loads cloudflare.config.ts with Node, which refuses TypeScript under node_modules, and an npx install
- * lives under node_modules; cf also looks for Wrangler in the project's own node_modules, not in a hoisted parent. Returns
- * { dir, remove } or undefined after reporting why not.
+ * A throwaway project for `cf deploy` or `wrangler dev`: the deploy configuration and the Worker source copied out of this
+ * package, and a link to the deploy tooling. cf loads cloudflare.config.ts with Node, which refuses TypeScript under
+ * node_modules, and an npx install lives under node_modules; cf also looks for Wrangler in the project's own node_modules.
+ * Returns { dir, remove } or undefined after reporting why not.
  */
-function prepareDeployProject(report) {
-  const dependencies = dependencyDir();
-  if (!dependencies) {
-    report.fail("deploy", `the dependencies of this package (wrangler, cf) are not installed next to ${PACKAGE_ROOT}`, `run \`npm install --omit=dev\` in ${PACKAGE_ROOT} and run setup again`);
+export function prepareDeployProject(report, { modules = toolchainModules, files = ["cloudflare.config.ts"] } = {}) {
+  if (!modules) {
+    report.fail("deploy", "the deploy tooling is not prepared", `run: ${NPX} setup`);
     return undefined;
   }
   const dir = mkdtempSync(join(tmpdir(), "beads-deploy-"));
@@ -473,16 +528,17 @@ function prepareDeployProject(report) {
     rmSync(dir, { recursive: true, force: true });
   };
   try {
-    copyFileSync(join(PACKAGE_ROOT, "cloudflare.config.ts"), join(dir, "cloudflare.config.ts"));
+    for (const file of files) copyFileSync(join(PACKAGE_ROOT, file), join(dir, file));
     // Only what the deployment needs: cf takes a package.json that lists `vite` (the development toolchain) for a Vite
-    // project and delegates the build to `vite build`, which this project does not have. The Worker is built by Wrangler.
-    const { devDependencies: _development, scripts: _scripts, ...manifest } = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
-    writeFileSync(join(dir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    // project and delegates the build to `vite build`, which this project does not have. cf finds Wrangler, which builds
+    // the Worker, through the dependencies listed here: the pinned deploy tooling.
+    const { devDependencies: _development, scripts: _scripts, dependencies: _dependencies, ...manifest } = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
+    writeFileSync(join(dir, "package.json"), `${JSON.stringify({ ...manifest, dependencies: deployPins() }, null, 2)}\n`);
     cpSync(join(PACKAGE_ROOT, "src"), join(dir, "src"), { recursive: true });
-    symlinkSync(dependencies, link, "junction");
+    symlinkSync(modules, link, "junction");
   } catch (error) {
     remove();
-    report.fail("deploy", `could not prepare the deployment project: ${error.message}`, "check that the temporary directory is writable and this package is complete, then run setup again");
+    report.fail("deploy", `could not prepare the deployment project: ${error.message}`, "check that the temporary directory is writable and this package is complete, then run the command again");
     return undefined;
   }
   return { dir, remove };
@@ -519,14 +575,14 @@ function workersDevOrigin(name) {
 
 // ------------------------------------------------------------------ the bd binary
 
-function versionOf(path) {
+export function versionOf(path) {
   if (isShim(path)) return null; // a .cmd or .bat shim needs cmd.exe; it is reported, never run
   const result = run(path, ["--version"], { timeout: 20000 });
   return result.status === 0 ? `${result.stdout}${result.stderr}`.trim() : null;
 }
 
 /** The bd commands the system finds on PATH, first winner first: PATH order times PATHEXT on Windows. */
-function findOnPath() {
+export function findOnPath() {
   return pathCandidates("bd", process.env.PATH ?? process.env.Path, process.platform, process.env.PATHEXT).filter((path) => {
     try {
       const info = statSync(path);
@@ -548,7 +604,7 @@ async function download(url, what) {
 }
 
 /** Puts bd in the install directory. Returns the installed path, or undefined after reporting why not. */
-async function installBinary(report, { binDir, bdFrom, storeVersion, releaseBase, dryRun }) {
+export async function installBinary(report, { binDir, bdFrom, storeVersion, releaseBase, dryRun }) {
   const target = join(binDir, binaryName());
   const stamp = storeVersion ? `+cloudflare.${storeVersion}` : undefined;
   const present = existsSync(target) ? versionOf(target) : undefined;
@@ -652,52 +708,105 @@ async function installBinary(report, { binDir, bdFrom, storeVersion, releaseBase
   return target;
 }
 
-/** After an install: is the first bd on PATH ours? Reports a shadowing bd and the exact way out. */
-function checkPathResolution(report, ours, binDir) {
+/**
+ * After an install: which bd runs when the user types `bd`. Returns the bd to use for the checks that follow. A missing PATH
+ * entry is not a failure: bd works by its full path, so the command offers to fix PATH (with consent or --add-to-path) and
+ * otherwise leaves one exact line to run. Only an upstream bd that comes first, and cannot open this backend, is a failure.
+ */
+async function checkPathResolution(report, ours, binDir, { addToPath = false, dryRun = false, replacingUpstream = false } = {}) {
   const found = findOnPath();
   const first = found[0];
   if (first && sameFile(first, ours)) {
     report.ok("bd on PATH", first);
-    return true;
+    return ours;
   }
   if (!first) {
-    report.fail("bd on PATH", `${binDir} is not on PATH, so \`bd\` is not found`, pathFix(binDir, process.platform).concat([`or call it by its full path: ${ours}`]));
-    return false;
+    // A profile line is run by every new shell: only a plain directory name is written there.
+    const plain = /^[\w./\\: ~+-]+$/.test(binDir);
+    const profile = win || !plain ? undefined : profileLine(binDir, process.env.SHELL, homedir());
+    if (!plain) addToPath = false;
+    let consent = addToPath;
+    if (!consent && profile && !dryRun && interactive()) consent = await askYesNo(`${binDir} is not on PATH. Add it to ${profile.file}?`, true);
+    if (consent && profile && !dryRun) {
+      const current = existsSync(profile.file) ? readFileSync(profile.file, "utf8") : "";
+      if (!current.split(/\r?\n/).includes(profile.line)) {
+        mkdirSync(dirname(profile.file), { recursive: true });
+        appendFileSync(profile.file, `${current && !current.endsWith("\n") ? "\n" : ""}# added by beads-cloudflare\n${profile.line}\n`);
+      }
+      report.ok("bd on PATH", `added ${binDir} to ${profile.file}; new shells find bd`);
+      report.note(`In this shell run once: ${profile.line}`);
+    } else if (consent && win && !dryRun) {
+      // The directory travels in an environment variable, never inside the script text. The raw registry value keeps
+      // %VAR% entries; an entry already present is not added again.
+      const script = "$k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment',$true); $v=$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); if (($v -split ';') -notcontains $env:BCF_BIN_DIR) { $k.SetValue('Path', ($env:BCF_BIN_DIR + ';' + $v).TrimEnd(';'), [Microsoft.Win32.RegistryValueKind]::ExpandString) }";
+      const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { env: { BCF_BIN_DIR: binDir } });
+      if (result.status === 0) {
+        report.ok("bd on PATH", `added ${binDir} to the user PATH; new terminals find bd`);
+        report.note(`In this PowerShell run once: $env:Path = "${binDir};" + $env:Path`);
+      } else report.note(`bd is installed at ${ours}. Put it on PATH: ${pathFix(binDir, process.platform)[1]}`);
+    } else {
+      report.info(`${binDir} is not on PATH; bd works by its full path (${ours})`);
+      report.note(`bd is not on PATH yet. Run: ${pathFix(binDir, process.platform)[0].replace(/ {2,}# .*$/, "")}${profile ? `   (to keep it: add that line to ${profile.file}, or run join again with --add-to-path)` : ""}`);
+    }
+    return ours;
   }
   const version = versionOf(first);
+  if (version?.includes("+cloudflare.")) {
+    // Another beads-cloudflare build: it opens this workspace; it is used as it is when it is the same release.
+    const same = backendVersionOf(version) === backendVersionOf(versionOf(ours));
+    if (same) report.ok("bd on PATH", `${first} (the same release as ${ours})`);
+    else {
+      report.info(`note: \`bd\` runs ${first} (${firstLine(version)}), not the release just installed at ${ours}`);
+      report.note(`To use the new release, put ${binDir} first on PATH or remove ${first}.`);
+    }
+    return first;
+  }
+  if (replacingUpstream) {
+    // migrate replaces an upstream bd on purpose: the migration is complete, and the old bd only has to step aside.
+    report.info(`note: \`bd\` still runs ${first}${version ? ` (${firstLine(version)})` : ""}, which cannot open this workspace`);
+    report.note(`Your previous bd comes first on PATH (${first}). Remove it (npm uninstall -g @beads/bd, brew uninstall beads, or delete the file), or run: ${pathFix(binDir, process.platform)[0].replace(/ {2,}# .*$/, "")}`);
+    return ours;
+  }
   report.fail(
     "bd on PATH",
-    `another bd comes first on PATH: ${first}${version ? ` (${firstLine(version)})` : isShim(first) ? " (a command shim, most likely upstream bd from npm)" : ""}; it cannot open a beads-cloudflare workspace`,
-    [`put ${binDir} before it on PATH:`, ...pathFix(binDir, process.platform), `or remove ${first} if it is not needed`],
+    `another bd comes first on PATH: ${first}${version ? ` (${firstLine(version)})` : isShim(first) ? " (a command shim, most likely upstream bd from npm)" : ""}; it is not a beads-cloudflare build and cannot open this workspace`,
+    [`put ${binDir} before it on PATH:`, ...pathFix(binDir, process.platform), `or remove ${first} if it is not needed (after migrating its issues: ${NPX} migrate <store url>)`],
   );
-  return false;
+  return undefined;
 }
 
 // ------------------------------------------------------------------ the repository
 
-function readRepoConfig(dir) {
+export function readRepoConfig(dir) {
   const path = join(dir, ".beads", "cloudflare.json");
-  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : undefined;
+  if (!existsSync(path)) return undefined;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Diagnosed("repository files", `${path} is not valid JSON`, `fix it, or delete it and run: ${NPX} join <store url>`);
+  }
 }
 
 /** Walks up from a directory to the nearest .beads/cloudflare.json. */
-function findRepoConfig(start) {
+export function findRepoConfig(start) {
   for (let dir = resolve(start); ; dir = dirname(dir)) {
     if (existsSync(join(dir, ".beads", "cloudflare.json"))) return { dir, config: readRepoConfig(dir) };
     if (dirname(dir) === dir) return undefined;
   }
 }
 
-const BEADS_GITIGNORE = `# Written by beads-cloudflare. Only the two configuration files are meant to be committed;
-# everything else bd keeps here is local to this clone (and .env may hold a credential).
-*
-!.gitignore
-!metadata.json
-!cloudflare.json
-`;
-
 /** True when the .gitignore in .beads is absent or was written by this tool; one the user wrote is left alone. */
 const ownedGitignore = (path) => !existsSync(path) || readFileSync(path, "utf8").startsWith("# Written by beads-cloudflare.");
+
+/** Moves an existing .beads aside to .beads.backup-<time>, kept out of Git. Returns the backup path. */
+export function moveWorkspaceAside(dir) {
+  const beads = join(dir, ".beads");
+  let aside = `${beads}.backup-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}`;
+  if (existsSync(aside)) aside = `${aside}-${randomBytes(3).toString("hex")}`;
+  renameSync(beads, aside);
+  excludeFromGit(dir, "/.beads.backup-*/");
+  return aside;
+}
 
 /** Writes .beads/ for the repository in dir. Returns { tracker } or undefined after reporting a conflict. */
 function writeRepositoryFiles(report, { dir, base, tracker, trackerExplicit, dryRun, replaceExisting, githubRepository }) {
@@ -705,14 +814,17 @@ function writeRepositoryFiles(report, { dir, base, tracker, trackerExplicit, dry
   const foreign = foreignWorkspaceReason(dir);
   if (foreign) {
     if (!replaceExisting) {
-      report.fail("repository files", `${foreign}; this directory is already a Beads workspace`, foreignWorkspaceFix);
+      report.fail("repository files", `${foreign}; this directory is already a Beads workspace`, foreignWorkspaceFix(base));
       return undefined;
     }
-    const aside = `${beads}.backup-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}`;
-    if (dryRun) report.would(`move ${beads} to ${aside} and start a fresh workspace (${foreign})`);
+    if (dryRun) report.would(`move ${beads} to ${beads}.backup-<time> (kept out of Git) and start a fresh workspace (${foreign})`);
     else {
-      renameSync(beads, aside);
-      report.ok("repository files", `the existing workspace (${foreign}) was moved to ${aside}`);
+      try {
+        report.ok("repository files", `the existing workspace (${foreign}) was moved to ${moveWorkspaceAside(dir)}`);
+      } catch (error) {
+        report.fail("repository files", `could not move .beads aside: ${error.code ?? error.message}`, "stop every bd or Dolt server process that uses this workspace, then run the command again");
+        return undefined;
+      }
     }
   }
   let existing;
@@ -750,28 +862,32 @@ function writeRepositoryFiles(report, { dir, base, tracker, trackerExplicit, dry
     [join(beads, "cloudflare.json"), existing && (!githubRepository || existing.github_repository === githubRepository) ? undefined : `${JSON.stringify({ ...existing, tracker, base, token_env: existing?.token_env ?? "BEADS_CLOUDFLARE_TOKEN", ...(githubRepository ? { github_repository: githubRepository } : {}) }, null, 2)}\n`],
     [join(beads, ".gitignore"), ownedGitignore(join(beads, ".gitignore")) ? BEADS_GITIGNORE : undefined],
   ];
-  for (const [path, text] of files) {
-    if (text === undefined) {
-      report.ok("repository files", `${basename(path)} already in place`);
-    } else if (dryRun) {
-      report.would(`write ${path}`);
-    } else if (writeIfChanged(path, text)) {
-      report.ok("repository files", `wrote ${path}`);
-    } else {
-      report.ok("repository files", `${basename(path)} already in place`);
-    }
+  if (!dryRun) {
+    // bd wants its workspace directory private to the user and warns on every command otherwise.
+    mkdirSync(beads, { recursive: true, mode: 0o700 });
+    if (!win) chmodSync(beads, 0o700);
   }
-  if (!dryRun) excludeGateLock(dir);
+  const written = [];
+  for (const [path, text] of files) {
+    if (text === undefined || dryRun ? false : writeIfChanged(path, text)) written.push(basename(path));
+    else if (dryRun && text !== undefined) report.would(`write ${path}`);
+  }
+  if (!dryRun) report.ok("repository files", written.length ? `wrote ${written.join(", ")} in ${beads}` : `already in place in ${beads}`);
+  if (!dryRun) {
+    excludeFromGit(dir, "/.beads.gate.lock");
+    // Upstream bd asks every command for a repository role unless one is set; this clone writes to its own tracker.
+    const role = run("git", ["config", "--get", "beads.role"], { cwd: dir });
+    if (role.status === 1 && run("git", ["rev-parse", "--git-dir"], { cwd: dir }).status === 0 && run("git", ["config", "beads.role", "maintainer"], { cwd: dir }).status === 0) report.ok("git config", "set beads.role=maintainer in this clone (upstream bd asks for it on every command otherwise)");
+  }
   report.ok("tracker", `${tracker} on ${base}`);
   return { tracker };
 }
 
-/** bd leaves a lock file next to .beads; keep it out of the repository without touching its .gitignore. */
-function excludeGateLock(dir) {
+/** Keeps a path out of the repository through .git/info/exclude, without touching any .gitignore. */
+function excludeFromGit(dir, line) {
   const located = run("git", ["rev-parse", "--git-path", "info/exclude"], { cwd: dir });
   if (located.status !== 0) return;
   const path = resolve(dir, located.stdout.trim());
-  const line = "/.beads.gate.lock";
   const current = existsSync(path) ? readFileSync(path, "utf8") : "";
   if (current.split(/\r?\n/).includes(line)) return;
   mkdirSync(dirname(path), { recursive: true });
@@ -781,39 +897,67 @@ function excludeGateLock(dir) {
 // ------------------------------------------------------------------ credentials
 
 function readCredentials() {
-  return readGithubCredentials(credentialsPath());
+  try {
+    return readGithubCredentials(credentialsPath());
+  } catch (error) {
+    const unsafe = /readable by other users/.test(error.message);
+    throw new Diagnosed("credential file", unsafe ? `${credentialsPath()} can be read by other users, so no key in it is used` : `${credentialsPath()}: ${error.message}`, /readable by other users/.test(error.message) ? (win ? `restrict ${credentialsPath()} to your user` : `chmod 600 ${credentialsPath()}`) : `fix or delete ${credentialsPath()}, then run: ${NPX} join <store url>`);
+  }
 }
 
-function storedKey(base) {
+export function storedKey(base) {
   const entry = Object.entries(readCredentials()).find(([k]) => k.replace(/\/+$/, "") === base);
   return credentialFresh(entry?.[1]) ? entry[1].token : undefined;
 }
 
-async function saveKey(base, token) {
+export async function saveKey(base, token) {
   await updateCredentialFile(credentialsPath(), (document) => withCredential(document, base, { token, expires_at: null }));
 }
 
+/** The fix lines for an untrusted origin: the flag and the variable that trust it. */
+const trustFix = (base, command = "join") => [
+  `trust this store on this host: ${NPX} ${command} ${command === "join" ? `${base} ` : ""}--trust-store`,
+  `or set BEADS_CLOUDFLARE_TRUSTED_ORIGINS=${exchangeOrigin(base)} (or BEADS_CLOUDFLARE_BASE=${exchangeOrigin(base)}) in the environment`,
+];
+
+/** Reads an agent key from --token-file (a path, or - for standard input). */
+function readTokenFile(path) {
+  try {
+    const text = path === "-" ? readFileSync(0, "utf8") : readFileSync(path, "utf8");
+    const key = text.trim();
+    if (!/^[\x21-\x7e]+$/.test(key)) throw new Error("empty or not a single key");
+    return registerSecret(key);
+  } catch (error) {
+    throw new Diagnosed("credential", `could not read an agent key from ${path === "-" ? "standard input" : path}: ${error.message}`, "put only the key in that file (one line), or pass it in BEADS_CLOUDFLARE_TOKEN");
+  }
+}
+
 /** The key to use for a store, and where it came from. Never printed. */
-async function obtainKey(report, { base, token, tokenSource, dryRun, githubRepository, tracker, trustStore }) {
+async function obtainKey(report, { base, token, tokenSource, tokenFile, dryRun, githubRepository, tracker, trustStore }) {
+  if (tokenFile) token = readTokenFile(tokenFile);
   const explicit = token ?? process.env.BEADS_CLOUDFLARE_TOKEN;
-  if (!token && explicit && !ambientBeadsStoreTrusted(base, { credentials: readCredentials() })) {
-    report.fail("credential", "the host's Beads environment credential is not bound to this store origin", "set BEADS_CLOUDFLARE_TRUSTED_ORIGINS, pair BEADS_CLOUDFLARE_BASE, or join with --trust-store");
+  if (!token && explicit && !trustStore && !ambientBeadsStoreTrusted(base, { credentials: readCredentials() })) {
+    report.fail("credential", `BEADS_CLOUDFLARE_TOKEN is set, but this host has not said which store it belongs to; it is not sent to ${base}`, trustFix(base));
     return undefined;
   }
-  if (explicit) return { key: explicit, source: tokenSource ?? (token ? "--token" : "BEADS_CLOUDFLARE_TOKEN") };
+  if (token && !tokenFile && !tokenSource) report.info("note: a key on the command line is visible to other processes and kept in shell history; prefer --token-file <file> or the prompt");
+  if (explicit) return { key: explicit, source: tokenSource ?? (tokenFile ? "--token-file" : token ? "--token" : "BEADS_CLOUDFLARE_TOKEN") };
   const stored = storedKey(base);
   if (stored) return { key: stored, source: credentialsPath() };
   if (githubRepository) {
-    if (dryRun) { report.would("resolve the existing GitHub identity through the trusted store's repository exchange"); return { key: "<exchanged key>", source: "GitHub repository exchange", dry: true }; }
+    if (dryRun) { report.would("exchange this host's GitHub identity for a tracker key at the store"); return { key: "<exchanged key>", source: "GitHub repository exchange", dry: true }; }
     try {
       const credential = await portableGithubCredential({ base, repository: githubRepository, tracker, trustStore });
       return { key: credential.token, expires_at: credential.expires_at, source: "GitHub repository exchange", github: true };
-    } catch (error) { report.fail("credential", error.message, "configure this host's trusted store origin and GitHub identity; check the server's repository mapping"); return undefined; }
+    } catch (error) {
+      report.fail(error.label ?? "credential", error.message, error.fix ?? "check the store's repository policy");
+      return undefined;
+    }
   }
   const admin = process.env.BEADS_ADMIN_TOKEN;
   if (admin) {
-    if (!ambientBeadsStoreTrusted(base, { credentials: readCredentials() })) {
-      report.fail("credential", "the host's admin environment credential is not bound to this store origin", "trust the intended store origin on this host before acquiring an agent key");
+    if (!trustStore && !ambientBeadsStoreTrusted(base, { credentials: readCredentials() })) {
+      report.fail("credential", `BEADS_ADMIN_TOKEN is set, but this host has not said which store it belongs to; it is not sent to ${base}`, trustFix(base));
       return undefined;
     }
     if (dryRun) {
@@ -822,30 +966,52 @@ async function obtainKey(report, { base, token, tokenSource, dryRun, githubRepos
     }
     const created = await createKey(base, admin, `agent-${deriveTrackerId(hostname()) || "host"}`);
     if (created.error) {
-      report.fail("credential", created.error, "check BEADS_ADMIN_TOKEN, or pass an existing key with --token <key>");
+      report.fail("credential", created.error, "check BEADS_ADMIN_TOKEN, or pass an existing key with --token-file <file>");
       return undefined;
     }
     return { key: created.key, source: "the store's admin route", created: true };
   }
+  if (!dryRun && interactive()) {
+    const key = registerSecret(await askHidden(`Agent key for ${base} (from whoever runs the store; input is hidden):`));
+    if (key) return { key, source: "the key you entered" };
+  }
   report.fail(
     "credential",
-    `no agent key for ${base}: not in --token, BEADS_CLOUDFLARE_TOKEN or ${credentialsPath()}`,
-    ["ask whoever runs the store for an agent key and run: " + `${NPX} join ${base} --token <key>`, `or, with the store's admin token: BEADS_ADMIN_TOKEN=<token> ${NPX} join ${base}`],
+    `no agent key for ${base} on this machine`,
+    [
+      `ask whoever runs the store for an invite (they run: ${NPX} invite), then run: ${NPX} join ${base}   (it asks for the key)`,
+      `without a terminal: put the key in a file and run: ${NPX} join ${base} --token-file <file>   (or set BEADS_CLOUDFLARE_TOKEN and BEADS_CLOUDFLARE_BASE=${base})`,
+    ],
   );
   return undefined;
 }
 
-async function portableGithubCredential({ base, repository, tracker, trustStore = false }) {
-  const origin = exchangeOrigin(base);
-  const credentials = readCredentials();
-  if (existsSync(credentialsPath()) && !privateEnough(credentialsPath())) throw new Error("credential file is readable by other users; restrict it to its owner");
-  if (trustStore) credentials[origin] = { ...credentials[origin], github_trusted: true };
-  const entry = await resolveGithubCredential({ base, repository, tracker, credentials });
-  await updateCredentialFile(credentialsPath(), (document) => {
-    document[origin] = { ...document[origin], ...(trustStore ? { github_trusted: true } : {}), github: { ...document[origin]?.github, [githubCredentialKey(repository, tracker)]: { token: entry.token, expires_at: entry.expires_at, ...(entry.renew_at ? { renew_at: entry.renew_at } : {}) } } };
-    return document;
-  });
-  return entry;
+/** A plain-language failure for the errors the GitHub exchange raises. */
+function githubExchangeFailure(error, base) {
+  const message = String(error?.message ?? error);
+  if (/not trusted by this host/.test(message)) return new Diagnosed("credential", `this host does not trust ${exchangeOrigin(base)} with its GitHub identity`, trustFix(base));
+  if (/needs github_repository/.test(message)) return new Diagnosed("credential", `no agent key for ${base} on this machine, and .beads/cloudflare.json names no github_repository for the GitHub exchange`, [`get a key from whoever runs the store, then run: ${NPX} join ${base}   (it asks for the key; or --token-file <file>)`, `or, when the store maps this repository: ${NPX} join ${base} --github-repository <owner/repo> --trust-store`]);
+  if (/No GitHub identity/.test(message)) return new Diagnosed("credential", "no GitHub identity on this host for the GitHub exchange", ["sign in once: gh auth login", "or set GH_TOKEN for this process"]);
+  if (/refused \(HTTP/.test(message)) return new Diagnosed("credential", message, "ask whoever runs the store to map this repository and tracker in its repository policy, or join with an agent key instead (--token-file <file>)");
+  if (/readable by other users/.test(message)) return new Diagnosed("credential", message, `chmod 600 ${credentialsPath()}`);
+  return new Diagnosed("credential", message, "check the network and the store address, then run the command again");
+}
+
+export async function portableGithubCredential({ base, repository, tracker, trustStore = false }) {
+  try {
+    const origin = exchangeOrigin(base);
+    const credentials = readCredentials();
+    if (existsSync(credentialsPath()) && !privateEnough(credentialsPath())) throw new Error("credential file is readable by other users; restrict it to its owner");
+    if (trustStore) credentials[origin] = { ...credentials[origin], github_trusted: true };
+    const entry = await resolveGithubCredential({ base, repository, tracker, credentials });
+    await updateCredentialFile(credentialsPath(), (document) => {
+      document[origin] = { ...document[origin], ...(trustStore ? { github_trusted: true } : {}), github: { ...document[origin]?.github, [githubCredentialKey(repository, tracker)]: { token: entry.token, expires_at: entry.expires_at, ...(entry.renew_at ? { renew_at: entry.renew_at } : {}) } } };
+      return document;
+    });
+    return entry;
+  } catch (error) {
+    throw error instanceof Diagnosed ? error : githubExchangeFailure(error, base);
+  }
 }
 
 // Auth-only: deliberately does not select a backend, install bd or touch .beads.
@@ -854,24 +1020,28 @@ export async function credentialsCommand(flag) {
   const base = flag.base ?? flag.store ?? process.env.BEADS_CLOUDFLARE_BASE ?? existing.base;
   const tracker = flag.tracker ?? process.env.BEADS_CLOUDFLARE_TRACKER ?? existing.tracker;
   const repository = flag["github-repository"] ?? existing.github_repository;
-  if (!beadsTokenEnvValid(existing.token_env)) throw new Error("token_env must name a BEADS_CLOUDFLARE credential variable; host identity variables are never accepted");
-  if (!base || trackerProblem(tracker)) throw new Error("credentials needs --base and --tracker, or an existing .beads/cloudflare.json");
+  if (!beadsTokenEnvValid(existing.token_env)) throw new Diagnosed("repository files", "token_env in .beads/cloudflare.json must name a BEADS_CLOUDFLARE_*_TOKEN variable", `remove token_env, or delete .beads/cloudflare.json and run: ${NPX} join <store url>`);
+  if (!base || trackerProblem(tracker)) throw new Diagnosed("credentials", "no store and tracker: no .beads/cloudflare.json here and no --base/--tracker", `${NPX} credentials --base <store url> --tracker <id>`);
   if (flag["dry-run"]) { console.log("beads-cloudflare: dry run, would resolve credentials without changing repository files."); return 0; }
   const explicit = flag.token ?? process.env.BEADS_CLOUDFLARE_TOKEN ?? (existing.token_env && process.env[existing.token_env]);
-  if (!flag.token && explicit && !ambientBeadsStoreTrusted(base, { credentials: readCredentials() })) throw new Error("Host Beads environment credential is not bound to this store origin");
+  if (!flag.token && explicit && !ambientBeadsStoreTrusted(base, { credentials: readCredentials() })) throw new Diagnosed("credential", `a key is set in the environment, but this host has not said which store it belongs to; it is not sent to ${base}`, trustFix(base, "credentials"));
   const token = explicit || storedKey(base.replace(/\/+$/, ""));
-  const entry = token ? { token, expires_at: null } : await portableGithubCredential({ base, repository, tracker, trustStore: flag["trust-store"] });
+  if (!token && !repository) throw githubExchangeFailure(new Error("needs github_repository"), base);
+  const entry = token ? { token, expires_at: null } : await portableGithubCredential({ base, repository, tracker, trustStore: flag["trust-store"] && normalizeStoreUrl(flag.base ?? flag.store ?? "").url === normalizeStoreUrl(base).url });
   if (flag.json) console.log(JSON.stringify({ token: entry.token, expires_at: entry.expires_at }));
   else console.log("beads-cloudflare: credentials ready; repository files were preserved.");
   return 0;
 }
 
-async function createKey(base, adminToken, label) {
+export async function createKey(base, adminToken, label, { scopes = ["beads:read", "beads:write"], trackers, days, attempts = 30 } = {}) {
+  registerSecret(adminToken);
   let last = "no answer";
-  for (let attempt = 1; attempt <= 30; attempt++) {
-    const answer = await request("POST", `${base}/admin/keys`, { token: adminToken, body: { label, scopes: ["beads:read", "beads:write"] } });
-    if (answer.status === 201 && answer.json?.key) return { key: answer.json.key };
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const body = { label, scopes, ...(trackers?.length ? { trackers } : {}), ...(days ? { expires_in_days: days } : {}) };
+    const answer = await request("POST", `${base}/admin/keys`, { token: adminToken, body });
+    if (answer.status === 201 && answer.json?.key) return { key: registerSecret(answer.json.key), id: answer.json.id, record: answer.json };
     if (answer.status === 401 || answer.status === 403) return { error: `the admin token was refused by ${base} (HTTP ${answer.status})` };
+    if (answer.status >= 400 && answer.status < 500 && ![404, 408, 429].includes(answer.status)) return { error: `${base}/admin/keys refused the request (HTTP ${answer.status}${answer.json?.detail ? `: ${answer.json.detail}` : ""})` };
     last = answer.status ? `HTTP ${answer.status}` : answer.error;
     await wait(2000); // a new workers.dev route needs a moment to propagate
   }
@@ -884,11 +1054,11 @@ async function createKey(base, adminToken, label) {
  * The credential bd will use in a repository, looked up in the backend's own order: the environment (BEADS_CLOUDFLARE_TOKEN, then the
  * variable `token_env` names), then `.beads/.env` (which bd loads into the environment), then the per-user credential file.
  */
-function effectiveCredential({ repoDir, base, tokenEnv }) {
-  if (!beadsTokenEnvValid(tokenEnv)) throw new Error("token_env must name a BEADS_CLOUDFLARE credential variable; host identity variables are never accepted");
+export function effectiveCredential({ repoDir, base, tokenEnv }) {
+  if (!beadsTokenEnvValid(tokenEnv)) throw new Diagnosed("repository files", "token_env in .beads/cloudflare.json must name a BEADS_CLOUDFLARE_*_TOKEN variable", `remove token_env from .beads/cloudflare.json, or delete that file and run: ${NPX} join ${base}`);
   const names = [...new Set(["BEADS_CLOUDFLARE_TOKEN", tokenEnv].filter(Boolean))];
   for (const name of names) if (process.env[name]) {
-    if (!ambientBeadsStoreTrusted(base, { credentials: readCredentials() })) throw new Error("Host Beads environment credential is not bound to this store origin");
+    if (!ambientBeadsStoreTrusted(base, { credentials: readCredentials() })) throw new Diagnosed("credential", `${name} is set, but this host has not said which store it belongs to; it is not sent to ${base}`, trustFix(base));
     return { key: process.env[name], kind: "env", source: `the environment variable ${name}`, name };
   }
   const envFile = repoDir && join(repoDir, ".beads", ".env");
@@ -936,7 +1106,7 @@ function whyBdFailed(result) {
 }
 
 /** Why a directory is a Beads workspace that does not belong to this store, or null. See the README's migration section. */
-function foreignWorkspaceReason(dir) {
+export function foreignWorkspaceReason(dir) {
   const beads = join(dir, ".beads");
   if (!existsSync(beads)) return null;
   const isDirectory = (path) => existsSync(path) && statSync(path).isDirectory();
@@ -960,7 +1130,11 @@ function foreignWorkspaceReason(dir) {
   return null;
 }
 
-const foreignWorkspaceFix = "archive and verify its retained database/history privately before authorized retirement; import archived exports as described in the README, or use --replace-existing-workspace only after archival to move .beads aside to .beads.backup-<time>";
+/** What to do with a Beads workspace that does not use this store: move its issues in, or start fresh. */
+const foreignWorkspaceFix = (base = "<store url>") => [
+  `to move its issues into the store: ${NPX} migrate ${base}   (exports them, keeps the old .beads as a backup, imports and compares counts)`,
+  `to start fresh instead: ${NPX} join ${base} --replace-existing-workspace   (moves .beads to .beads.backup-<time>; nothing is imported)`,
+];
 
 /**
  * The self-test. options.bin names a bd to use instead of the one on PATH.
@@ -978,7 +1152,7 @@ async function scratchSelfTest(report, { cwd, bin, store, dryRun = false }) {
   if (found) {
     const foreign = foreignWorkspaceReason(found.dir);
     if (foreign || !existsSync(join(found.dir, ".beads", "metadata.json"))) {
-      report.fail("repository", `${foreign ?? ".beads/metadata.json is missing"}, so bd does not use the Cloudflare store here`, [`run in this repository: ${NPX} join ${base}`, foreignWorkspaceFix]);
+      report.fail("repository", `${foreign ?? ".beads/metadata.json is missing"}, so bd does not use the Cloudflare store here`, foreignWorkspaceFix(base));
       return;
     }
   }
@@ -1131,17 +1305,23 @@ async function selfTest(report, { cwd, bin, store, dryRun = false, scratch = fal
   const base = process.env.BEADS_CLOUDFLARE_BASE ?? store ?? repo.base;
   const tracker = process.env.BEADS_CLOUDFLARE_TRACKER ?? repo.tracker;
   if (!base || trackerProblem(tracker)) { report.fail("repository", "store and tracker are not configured", `${NPX} join <store url> --tracker <id>`); return; }
-  if (found && foreignWorkspaceReason(found.dir)) { report.fail("repository", foreignWorkspaceReason(found.dir), "credentials authenticates without changing repository storage"); return; }
+  if (found && foreignWorkspaceReason(found.dir)) { report.fail("repository", `${foreignWorkspaceReason(found.dir)}, so bd does not use the Cloudflare store here`, foreignWorkspaceFix(base)); return; }
   if (dryRun) { report.would("check the first bd on PATH, resolve credentials, read tracker context and run bd --readonly ready --json; no tracker records are written"); return; }
-  const installDir = defaultBinDir(process.platform, process.env, homedir());
-  const bd = bin ?? findOnPath()[0];
+  const installDir = resolve(process.env.BEADS_CLOUDFLARE_BIN_DIR || defaultBinDir(process.platform, process.env, homedir()));
+  const installed = join(installDir, binaryName());
+  let bd = bin ?? findOnPath()[0];
+  if (!bd && existsSync(installed)) {
+    // Installed but not on PATH: bd works by its full path, so readiness is checked with it and PATH is only a note.
+    bd = installed;
+    report.info(`bd is installed at ${installed} but ${installDir} is not on PATH (${pathFix(installDir, process.platform)[0].replace(/ {2,}# .*$/, "")})`);
+  }
   if (!bd || isShim(bd)) {
-    report.fail("bd on PATH", bd ? `the first bd is a command shim: ${bd}` : "bd is not found", pathFix(installDir, process.platform));
+    report.fail("bd on PATH", bd ? `the first bd is a command shim: ${bd}` : "no bd is installed on this machine", bd ? pathFix(installDir, process.platform) : `install it for this repository: ${NPX} bootstrap`);
     return;
   }
   const reported = versionOf(bd);
   if (!reported?.includes("+cloudflare.")) {
-    report.fail("bd on PATH", `${bd} is not a Cloudflare-capable bd`, pathFix(installDir, process.platform));
+    report.fail("bd on PATH", `${bd} comes first on PATH and is not a beads-cloudflare build, so it cannot open this workspace`, [`install the matching bd: ${NPX} bootstrap`, ...pathFix(installDir, process.platform)]);
     return;
   }
   let credential = effectiveCredential({ repoDir: found?.dir, base, tokenEnv: repo.token_env });
@@ -1187,7 +1367,7 @@ async function selfTest(report, { cwd, bin, store, dryRun = false, scratch = fal
 // ------------------------------------------------------------------ commands
 
 /** Every value the user supplied, checked against a strict pattern before it is used anywhere. Returns [what, why] pairs. */
-function optionProblems(flag) {
+export function optionProblems(flag) {
   const out = [];
   const check = (what, problem) => problem && out.push([what, problem]);
   if (flag.name !== undefined) check("Worker name", workerNameProblem(flag.name));
@@ -1217,8 +1397,8 @@ export async function doctorCommand(flag) {
   return report.finish("doctor");
 }
 
-export async function joinCommand(flag, positional, { report: shared, token: handedToken, tokenSource } = {}) {
-  const report = shared ?? new Report(flag["dry-run"]);
+export async function joinCommand(flag, positional, { report: shared, token: handedToken, tokenSource, dir: joinDir, out = {}, quietAgents = false, replacingUpstream = false } = {}) {
+  const report = shared ?? new Report(flag["dry-run"], `${NPX} join ${positional[0] ?? "<store url>"}`);
   const dryRun = flag["dry-run"];
   const done = () => (shared ? report.failures : report.finish("join"));
   if (!shared) console.log(`beads-cloudflare ${CLI_VERSION} join${dryRun ? " (dry run)" : ""}`);
@@ -1241,11 +1421,17 @@ export async function joinCommand(flag, positional, { report: shared, token: han
     return done();
   }
 
+  const agentChoice = flag.agents === undefined ? undefined : parseAgents(flag.agents);
+  if (agentChoice?.problem) {
+    report.fail("--agents", agentChoice.problem, "correct the option and run the command again");
+    return done();
+  }
+
   // A Beads workspace that does not belong to this store is refused before anything is written, installed or stored.
-  const dir = process.cwd();
+  const dir = joinDir ?? process.cwd();
   const foreign = foreignWorkspaceReason(dir);
   if (foreign && !flag["replace-existing-workspace"]) {
-    report.fail("repository files", `${foreign}; this directory is already a Beads workspace`, foreignWorkspaceFix);
+    report.fail("repository files", `${foreign}; this directory is already a Beads workspace`, foreignWorkspaceFix(base));
     return done();
   }
   let existing;
@@ -1275,19 +1461,19 @@ export async function joinCommand(flag, positional, { report: shared, token: han
     const origin = exchangeOrigin(base);
     await updateCredentialFile(credentialsPath(), (document) => withCredential(document, origin, { github_trusted: true }));
   }
-  const credential = await obtainKey(report, { base, token: handedToken ?? flag.token, tokenSource, dryRun, githubRepository, tracker: existing?.tracker ?? tracker, trustStore: flag["trust-store"] });
+  const credential = await obtainKey(report, { base, token: handedToken ?? flag.token, tokenSource, tokenFile: handedToken ? undefined : flag["token-file"], dryRun, githubRepository, tracker: existing?.tracker ?? tracker, trustStore: flag["trust-store"] });
   if (!credential) return done();
   let storeVersion;
   if (!credential.dry) {
     const answer = await readContext(base, credential.key, existing?.tracker ?? tracker);
     if (answer.problem) {
-      report.fail("credential", answer.problem, answer.refused ? `use a key this store issued: ${NPX} join ${base} --token <key>` : "check the address and the network");
+      report.fail("credential", answer.problem, answer.refused ? (credential.source === credentialsPath() ? `the stored key was refused; get a new key and run: ${NPX} join ${base} --token-file <file>` : `use a key this store issued: ${NPX} join ${base}   (it asks for the key), or --token-file <file>`) : "check the address and the network");
       return done();
     }
     storeVersion = answer.doc.x_store_version;
     report.ok("credential", `accepted by the store (from ${credential.source}); store version ${storeVersion ?? "unknown (older than 0.1.0)"}`);
     const order = compareVersions(CLI_VERSION, storeVersion);
-    if (order !== null && order > 0) report.info(`note: this tool is ${CLI_VERSION} and the store is ${storeVersion}; to update the store run: ${NPX}#v${CLI_VERSION} setup`);
+    if (order !== null && order > 0) report.info(`note: this tool is ${CLI_VERSION} and the store is ${storeVersion}; whoever runs the store updates it with: npx --yes beads-cloudflare@${CLI_VERSION} setup`);
   } else storeVersion = CLI_VERSION;
 
   if (credential.github) {
@@ -1322,31 +1508,61 @@ export async function joinCommand(flag, positional, { report: shared, token: han
     return done();
   }
   report.heading("Checking the installation");
-  const onPathOk = checkPathResolution(report, installed, binDir);
-  await selfTest(report, { cwd: dir, bin: onPathOk ? undefined : installed, store: base, scratch: flag.scratch });
+  const bd = await checkPathResolution(report, installed, binDir, { addToPath: flag["add-to-path"], dryRun, replacingUpstream });
+  await selfTest(report, { cwd: dir, bin: bd ?? installed, store: base, scratch: flag.scratch });
+  Object.assign(out, { bd: bd ?? installed, key: credential.key, tracker: files.tracker, base, dir });
+  if (report.failures === 0) await wireAgents(report, { dir, base, version: CLI_VERSION, choice: agentChoice?.agents, ask: !quietAgents && agentChoice === undefined && interactive(), dryRun });
   return done();
 }
 
 /** An already configured clone gets credentials and bd without rewriting its tracker. */
 export async function bootstrapCommand(flag) {
   const report = new Report(flag["dry-run"]);
+  console.log(`beads-cloudflare ${CLI_VERSION} bootstrap${flag["dry-run"] ? " (dry run)" : ""}`);
+  if (!checkNode(report)) return report.finish("bootstrap");
   const found = findRepoConfig(process.cwd());
-  if (!found) { report.fail("repository", "no existing .beads/cloudflare.json", `${NPX} join <store url>`); return report.finish("bootstrap"); }
-  if (foreignWorkspaceReason(found.dir)) { report.fail("repository", "bootstrap requires an existing Cloudflare workspace", "use credentials for authentication only; archive and verify retained local history before authorized retirement"); return report.finish("bootstrap"); }
-  if (flag["dry-run"]) { report.would("resolve the existing repository credential, install matching bd and read tracker context; preserve repository files"); return report.finish("bootstrap"); }
+  if (!found) { report.fail("repository", "no .beads/cloudflare.json in this directory or above", `join a store first: ${NPX} join <store url>`); return report.finish("bootstrap"); }
   const cfg = found.config;
-  let credential = effectiveCredential({ repoDir: found.dir, base: cfg.base, tokenEnv: cfg.token_env });
-  if (!credential) { const entry = await portableGithubCredential({ base: cfg.base, repository: cfg.github_repository, tracker: cfg.tracker, trustStore: flag["trust-store"] }); credential = { key: entry.token }; }
-  const context = await readContext(cfg.base, credential.key, cfg.tracker);
-  if (context.problem) { report.fail("tracker context", context.problem, "check the repository mapping and credential"); return report.finish("bootstrap"); }
+  const base = normalizeStoreUrl(cfg.base ?? "").url;
+  if (!base || trackerProblem(cfg.tracker)) { report.fail("repository", ".beads/cloudflare.json names no valid base and tracker", `delete it and run: ${NPX} join <store url>`); return report.finish("bootstrap"); }
+  if (foreignWorkspaceReason(found.dir)) { report.fail("repository", `${foreignWorkspaceReason(found.dir)}, so bd does not use the Cloudflare store here`, foreignWorkspaceFix(base)); return report.finish("bootstrap"); }
+  report.heading(`Bootstrap ${found.dir} (tracker ${cfg.tracker} on ${base})`);
+  if (flag["dry-run"]) { report.would("resolve the credential, install the matching bd and read the tracker context; repository files are kept"); return report.finish("bootstrap"); }
+  if (flag["trust-store"]) {
+    // Trust goes only to an origin the user typed: the address in a cloned repository's file cannot grant it.
+    if (normalizeStoreUrl(flag.store ?? "").url !== base) { report.fail("--trust-store", `trusting ${base} needs that address typed out, because it comes from .beads/cloudflare.json`, `${NPX} bootstrap --trust-store --store ${base}`); return report.finish("bootstrap"); }
+    await updateCredentialFile(credentialsPath(), (document) => withCredential(document, exchangeOrigin(base), { github_trusted: true }));
+  }
+  let credential = flag["token-file"] ? { key: readTokenFile(flag["token-file"]), source: "--token-file" } : effectiveCredential({ repoDir: found.dir, base, tokenEnv: cfg.token_env });
+  if (!credential && cfg.github_repository) {
+    const entry = await portableGithubCredential({ base, repository: cfg.github_repository, tracker: cfg.tracker, trustStore: flag["trust-store"] });
+    credential = { key: entry.token, source: "GitHub repository exchange" };
+  }
+  if (!credential) {
+    const fix = [`get an agent key from whoever runs the store, then run here: ${NPX} join ${base}   (it asks for the key; or --token-file <file>)`, `in a container or CI: set BEADS_CLOUDFLARE_TOKEN and BEADS_CLOUDFLARE_BASE=${base}, then run: ${NPX} bootstrap`];
+    if (!interactive()) {
+      report.fail("credential", `no agent key for ${base} on this machine${cfg.github_repository ? "" : ", and .beads/cloudflare.json names no github_repository for the GitHub exchange"}`, fix);
+      return report.finish("bootstrap");
+    }
+    const key = registerSecret(await askHidden(`Agent key for ${base} (from whoever runs the store; input is hidden):`));
+    if (!key) { report.fail("credential", "no key entered", fix); return report.finish("bootstrap"); }
+    credential = { key, source: "the key you entered", entered: true };
+  }
+  const context = await readContext(base, credential.key, cfg.tracker);
+  if (context.problem) { report.fail("tracker context", context.problem, context.refused ? `get a key for tracker ${cfg.tracker} and run: ${NPX} join ${base}` : "check the store address and the network"); return report.finish("bootstrap"); }
+  report.ok("credential", `accepted by the store (from ${credential.source})`);
+  if (credential.entered) { await saveKey(base, credential.key); report.ok("credential file", `${credentialsPath()} (readable by you only)`); }
   const binDir = resolve(flag["bin-dir"] ?? defaultBinDir(process.platform, process.env, homedir()));
   const installed = await installBinary(report, { binDir, bdFrom: flag["bd-from"] && resolve(flag["bd-from"]), storeVersion: context.doc.x_store_version, releaseBase: flag["release-base"], dryRun: false });
-  if (installed) { checkPathResolution(report, installed, binDir); await selfTest(report, { cwd: found.dir, bin: installed }); }
+  if (installed) {
+    const bd = await checkPathResolution(report, installed, binDir, { addToPath: flag["add-to-path"] });
+    await selfTest(report, { cwd: found.dir, bin: bd ?? installed });
+  }
   return report.finish("bootstrap");
 }
 
 export async function setupCommand(flag, positional) {
-  const report = new Report(flag["dry-run"]);
+  const report = new Report(flag["dry-run"], `${NPX} setup`);
   const dryRun = flag["dry-run"];
   const name = flag.name ?? "beads-cloudflare";
   console.log(`beads-cloudflare ${CLI_VERSION} setup${dryRun ? " (dry run)" : ""}`);
@@ -1371,8 +1587,7 @@ export async function setupCommand(flag, positional) {
     }
   }
   if (!(await checkNetwork(report))) return report.finish("setup");
-  const login = dryRun ? { accountId: process.env.CLOUDFLARE_ACCOUNT_ID } : await checkCloudflareCli(report, { allowOutdated: Boolean(flag["allow-outdated-cf"]) });
-  if (dryRun) report.would("check that cf is installed, on its newest release (npm registry) and signed in: cf --version, cf auth whoami");
+  const login = await checkCloudflareCli(report, { dryRun });
   if (!login) return report.finish("setup");
 
   const accessGiven = [flag["access-issuer"], flag["access-client-id"], flag["access-client-secret"]];
@@ -1423,6 +1638,8 @@ export async function setupCommand(flag, positional) {
     access_issuer: flag["no-sign-in"] ? "" : (flag["access-issuer"] ?? found.accessIssuer ?? prior?.access_issuer ?? ""),
     github_repositories: githubRepositories ?? found.githubRepositories ?? prior?.github_repositories ?? "{}",
     github_read_app: process.env.BEADS_GITHUB_READ_APP ?? (existing.exists ? (found.githubReadApp ?? "") : (prior?.github_read_app ?? "")),
+    github_merge_closer: process.env.BEADS_GITHUB_MERGE_CLOSER ?? (existing.exists ? (found.githubMergeCloser ?? "") : (prior?.github_merge_closer ?? "")),
+    github_workflow_grants: process.env.BEADS_GITHUB_WORKFLOW_GRANTS ?? (existing.exists ? (found.githubWorkflowGrants ?? "") : (prior?.github_workflow_grants ?? "")),
   };
 
   // Secrets the Worker already has are left alone (a deploy keeps them); only missing ones are generated and uploaded.
@@ -1446,7 +1663,7 @@ export async function setupCommand(flag, positional) {
 
   const readBack = found.origin && !PLACEHOLDER_ORIGIN.test(found.origin) ? found.origin.replace(/\/+$/, "") : undefined;
   const knownOrigin = flag.origin?.replace(/\/+$/, "") ?? state.origin ?? readBack;
-  const settingsFor = (origin) => ({ kvId, origin, adminEmails: settings.admin_emails, accessIssuer: settings.access_issuer, accessSecrets, githubRepositories: settings.github_repositories, githubReadApp: settings.github_read_app, accountId: login.accountId });
+  const settingsFor = (origin) => ({ kvId, origin, adminEmails: settings.admin_emails, accessIssuer: settings.access_issuer, accessSecrets, githubRepositories: settings.github_repositories, githubReadApp: settings.github_read_app, githubMergeCloser: settings.github_merge_closer, githubWorkflowGrants: settings.github_workflow_grants, accountId: login.accountId });
   const first = deploy(report, { name, env: settingsFor(knownOrigin ?? `https://${name}.example.workers.dev`), secrets });
   if (!first) return report.finish("setup");
   const origin = knownOrigin ?? workersDevOrigin(name) ?? new RegExp(`https://${name}\\.[\\w-]+\\.workers\\.dev`).exec(first.output)?.[0];
@@ -1505,17 +1722,18 @@ export async function setupCommand(flag, positional) {
   if (firstSecrets || newKey) {
     if (firstSecrets) report.ok("admin token", `created and kept in ${statePath} (readable by you only)`);
     if (newKey) report.ok("agent key", `created and kept in ${credentialsPath()} (readable by you only)`);
-    report.info("Credentials are already in custody for bd. Their values are never printed by setup.");
+    report.info("Keys are stored for bd; setup never prints their values.");
   } else report.ok("agent key", `already in ${credentialsPath()}`);
   report.info(settings.access_issuer ? "sign-in: configured (Cloudflare Access)" : "sign-in: off, agent keys only (README, \"Configure sign-in\", turns it on later)");
+  report.note(`Invite a teammate or another machine: ${NPX} invite --store ${origin}`);
 
-  if (flag["no-join"]) return report.finish("setup");
+  if (flag["no-join"]) return report.finish("setup", `beads-cloudflare: the store is ready at ${origin}.`);
   await joinCommand(flag, [origin], { report, token: key, tokenSource: credentialsPath() });
   return report.finish("setup");
 }
 
 export async function uninstallCommand(flag) {
-  const report = new Report(flag["dry-run"]);
+  const report = new Report(flag["dry-run"], `${NPX} uninstall`);
   const dryRun = flag["dry-run"];
   console.log(`beads-cloudflare ${CLI_VERSION} uninstall${dryRun ? " (dry run)" : ""}`);
 
@@ -1559,5 +1777,25 @@ export async function uninstallCommand(flag) {
     report.ok("credentials", `${base ? `entry for ${base}` : "all entries"} removed from ${credentials}`);
   }
   report.info("The store and its data, the .beads folders of repositories and the stored admin token are not touched.");
+  report.info("To remove the store itself, export every tracker first (bd export --all -o <file> in each repository), then follow README \"Remove everything\".");
   return report.finish("uninstall", "beads-cloudflare: uninstalled from this machine.");
+}
+
+/** `beads-cloudflare mcp`: a stdio MCP server for agents, authenticated with the credential bd uses here. */
+export async function mcpCommand(flag) {
+  const { runBridge } = await import("./mcp-bridge.mjs");
+  let found;
+  try {
+    found = findRepoConfig(process.cwd());
+  } catch {}
+  const base = normalizeStoreUrl(flag.store ?? process.env.BEADS_CLOUDFLARE_BASE ?? found?.config?.base ?? "").url;
+  if (!base) throw new Diagnosed("store", "no store: no --store and no .beads/cloudflare.json here", `${NPX} mcp --store <store url>`);
+  const repo = found?.config?.base?.replace(/\/+$/, "") === base ? found : undefined;
+  let credential = effectiveCredential({ repoDir: repo?.dir, base, tokenEnv: repo?.config?.token_env });
+  if (!credential && repo?.config?.github_repository) {
+    const entry = await portableGithubCredential({ base, repository: repo.config.github_repository, tracker: repo.config.tracker });
+    credential = { key: entry.token };
+  }
+  if (!credential) throw new Diagnosed("credential", `no agent key for ${base} on this machine`, `${NPX} join ${base}`);
+  return runBridge({ endpoint: `${base}/mcp`, key: credential.key });
 }

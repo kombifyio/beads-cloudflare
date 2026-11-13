@@ -173,5 +173,5 @@ export function authenticateKey(sql: SqlStorage, id: string, secretHash: string,
   const k = info(row);
   // Exchange display labels are shared; ownership follows the verified issuer identity across key rotation.
   const exchangeIdentity = k.created_by.startsWith("github-exchange:") ? k.created_by : undefined;
-  return { sub: exchangeIdentity ?? `key:${k.id}`, email: exchangeIdentity ?? `agent:${k.label}`, name: k.label, scopes: k.scopes, trackers: k.trackers, kind: "key" };
+  return { sub: exchangeIdentity ?? `key:${k.id}`, email: exchangeIdentity ?? `agent:${k.label}`, name: k.label, scopes: k.scopes, trackers: k.trackers, kind: "key", credentialExpiresAt: k.expires_at };
 }

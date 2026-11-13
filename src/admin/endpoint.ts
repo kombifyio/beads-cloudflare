@@ -4,6 +4,7 @@
 import { effectiveScopes, SCOPE_WRITE } from "../auth/scopes";
 import type { ApiContext } from "../auth/provider";
 import { readBody, respond, storeFor } from "../http/endpoint";
+import { backupSweepState, runBackupSweep } from "../tracker/backup";
 import { thresholdsFrom } from "../tracker/health";
 import { parseKeyRequest } from "../tracker/keys";
 import { NO_SUCH_ROUTE, problemOut, Refusal } from "../tracker/problem";
@@ -24,12 +25,16 @@ export async function handleAdmin(request: Request, env: Env, ctx: ApiContext): 
   const requestId = crypto.randomUUID();
   const path = new URL(request.url).pathname;
   const one = /^\/admin\/keys\/([^/]+)$/.exec(path);
-  const known = path === "/admin/keys" || path === "/admin/trackers" || path === "/admin/health" || one;
+  const known = path === "/admin/keys" || path === "/admin/trackers" || path === "/admin/health" || path === "/admin/backups/sweep" || one;
   if (!known) return respond(NO_SUCH_ROUTE, requestId);
   if (!isAdmin(env, ctx)) {
     return respond(problemOut("forbidden", "this needs an administrator"), requestId);
   }
   try {
+    if (path === "/admin/backups/sweep") {
+      if (request.method === "POST") await runBackupSweep(env, new Date(), { manual: true });
+      if (["GET", "POST"].includes(request.method)) return respond({ status: 200, body: await backupSweepState(env) }, requestId);
+    }
     const store = storeFor(env);
     if (path === "/admin/trackers" && request.method === "GET") {
       // Issue counts per tracker and status: how an operator checks a migration without SQL.

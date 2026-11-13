@@ -15,7 +15,7 @@ export const SCOPES_SUPPORTED = [SCOPE_READ, SCOPE_WRITE, SCOPE_OFFLINE];
  * The members below are set by this server for credentials it resolves itself (agent API keys and
  * the admin token); they never come from a client.
  */
-export interface Principal {
+export type Principal = {
   sub: string;
   email: string;
   name: string;
@@ -23,8 +23,10 @@ export interface Principal {
   scopes?: string[];
   /** Agent API key: trackers it may use; null or absent means all. */
   trackers?: string[] | null;
-  kind?: "key" | "admin-token";
-}
+} & (
+  | { kind: "key"; credentialExpiresAt: string | null }
+  | { kind?: "admin-token"; credentialExpiresAt?: never }
+);
 
 /** The scopes a request holds: a key's own, otherwise the OAuth token's. */
 export const effectiveScopes = (principal: Principal, tokenScopes: string[]): string[] => principal.scopes ?? tokenScopes;

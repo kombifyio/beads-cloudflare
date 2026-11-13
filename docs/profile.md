@@ -1,7 +1,7 @@
 # Profile declaration
 
 This server is a **profile** of the upstream `bd serve` `/v0` contract
-(`spec/upstream/openapi.v0.yaml`, Beads v1.3.1; see the "Profiles" section of that document). This
+(`spec/upstream/openapi.v0.yaml`, Beads v1.3.4; see the "Profiles" section of that document). This
 page is the declaration the profile rules require: what is implemented, what is omitted, and every
 deviation and extension. Conformance is checkable against wire JSON: every member emitted under a core
 name carries the core type and semantics or is absent.
@@ -55,7 +55,7 @@ name carries the core type and semantics or is absent.
 | Authentication | A bearer credential on every route under `/t/`: an OAuth 2.1 access token or an agent API key (see "Agent API keys"), including `health` and undefined paths; a request without a valid token gets the provider's `401` challenge, not the core's `unauthenticated` Problem body. A token lacking `beads:write` gets the provider's `403` `insufficient_scope` challenge on writes. `GET /healthz` at the root is unauthenticated. | One Worker is the resource and the authorization server. |
 | `actor` | Required and validated exactly as upstream (it is a required request member), but **never trusted**: the actor of every mutation and event, `created_by`, and a comment's `author` are the verified principal's email. The asserted value is kept only as the event extension `x_client_actor`. Ownership checks (claim, release) compare against the principal. | Identity comes from the token. |
 | `limit=0` | Refused on `listIssues`, `queryIssues` and `listReadyWork` (`invalid_argument`, `param: limit`), as upstream does when bound beyond loopback. | Not a loopback server. |
-| `getContext` | `backend: "cloudflare"`, `dolt_mode: ""`, `database: ""`, `bd_version` is the upstream release this profile follows (`1.3.1`); `beads_dir` and `repo_root` are omitted (allowed by the schema). | No filesystem or Dolt. |
+| `getContext` | `backend: "cloudflare"`, `dolt_mode: ""`, `database: ""`, `bd_version` is the upstream release this profile follows (`1.3.4`); `beads_dir` and `repo_root` are omitted (allowed by the schema). | No filesystem or Dolt. |
 | Members not stored | Issue members for features this server does not have are absent, never re-spelled: `lease_granted_node` and `comments` inside list items. The members a record only carries when it was imported (`spec_id`, compaction fields, wisp, molecule and gate fields, `is_template`, ...) are emitted verbatim when the import stored them and are absent otherwise; a consumer cannot tell "unset" from "not supported" for them. `is_blocked` is emitted, as `true` or `false`, on `listIssues` and `queryIssues` items (upstream leaves it out of these reads and documents it as a journal member; see "Blocked" in `docs/semantics.md`) and is absent everywhere else. | Subset. |
 | Edge records | `Dependency.id` and `thread_id` are never emitted. | Not stored. |
 | `getIssue` | `revision` is the decimal string of the issue's version counter (starts at 1, increments on every change to the issue row, labels included, not on edge or comment writes). `dependents` and `brief_deps` entries are shallow with zero timestamps, as upstream emits. | See `docs/semantics.md`. |
@@ -77,12 +77,12 @@ name carries the core type and semantics or is absent.
 
 ## Declared conformance deviations (`bd` backend)
 
-The `bd/` client is held to the upstream `v1.3.1` live conformance suite on every pull request
+The `bd/` client is held to the upstream `v1.3.4` live conformance suite on every pull request
 (`scripts/pair-proof.sh`). Its reclaim fixtures are adjusted as declared below; this is a
 profile-adjusted upstream suite, not an unmodified upstream run. The release gate admits exactly the
 eight below (`knownFailures` in `scripts/conformance-result.mjs`): any other failure, a skipped
 check or fewer than 60 checks fails the run, so a fix elsewhere cannot hide a new break. Line
-numbers are from upstream `v1.3.1`.
+numbers are from upstream `v1.3.4`.
 
 The upstream reclaim fixtures assume a fresh default lease expires before their one-hour
 future cutoff (`backend/conformance/claim.go:168`, `reclaim_scope.go:43,95`). This profile's
@@ -135,7 +135,7 @@ Work on an issue is locked by a **claim**: status `in_progress`, an assignee (th
 
 - **Starting work is a claim.** `claimIssue` and `claimNextIssue` take one, and so does an `updateIssue` that moves an issue to `in_progress`, re-asserts `in_progress` on an issue nobody holds, or sets an assignee on an in-progress issue: the verified principal takes the claim under the worker name the request asserts (or the assignee it names), with the default lease (7200 s) and a raised fencing number. A bare status therefore cannot mark work started without locking it. `in_progress` together with an empty `assignee` is `400`; an empty `assignee` alone on an in-progress issue gives the claim up and the issue is `open` again; a status patch does not take an issue allocated to another name (`409 already_claimed`, `force_assignee_transfer` takes it).
 - **The holder is a principal and a worker.** A claim records the verified principal (`claimed_by`) and the worker name (`assignee`). The holder is the request whose principal and worker name both match: every session of one GitHub user shares one principal, so the worker name (the native `--actor` or `BEADS_ACTOR`, the MCP `worker_actor`) is what keeps two such sessions apart, and another principal under the same worker name is refused too. The worker name is cooperative, not authentication: it separates sessions that do not mean to collide.
-- **Ownership fields are opaque subjects.** New `claimed_by`, `x_claim.verified_principal`, refusal `x_claimed_by` and exported claim holders contain the verified subject: `key:<id>` for an ordinary API key, the stable GitHub exchange subject across key rotation, or the OAuth subject. Consumers compare these values as opaque identities and use context `verified_principal.email` or audit authors for display; they must not parse a holder as an email. Legacy OAuth email holders remain accepted. A legacy ordinary-key label is accepted only when the latest custody transition proves the current fencing generation and exactly one historical key; imported or missing custody evidence fails closed.
+- **Ownership fields are opaque subjects.** New `claimed_by`, `x_claim.verified_principal`, refusal `x_claimed_by` and exported claim holders contain the verified subject: `key:<id>` for an ordinary API key, the stable GitHub exchange subject across key rotation, or the OAuth subject. Consumers compare these values as opaque identities and use context `verified_principal.email` or audit authors for display; they must not parse a holder as an email. Legacy OAuth email holders remain accepted. A legacy ordinary-key label is accepted only when the latest ownership transition proves the current fencing generation and exactly one historical key; imported or missing ownership evidence fails closed.
 - **Lease and fencing.** `claimIssue` and `claimNextIssue` accept `x_lease_seconds` (integer 1..86400, default 7200) and answer `x_fencing_token` (incremented on every real claim, and when a lapse, a takeover or an override ends one). The holder claiming again before expiry renews the lease to the TTL it names and answers `already_claimed: true` with the unchanged token. `heartbeat` renews it without a claim. Implicit renewals keep a long piece of work locked without anyone asking: any `updateIssue` of the holder that changes something, and any comment under its worker name (a comment writes no version), push the lease out to the default and only ever extend it. Explicit renewals append a `lease_renewed` event.
 - **A lapsed claim releases itself.** Every read and write of a tracker first releases its claims whose lease has passed: the issue is `open` and unassigned, `started_at` is cleared, the fencing number is raised (the lapsed holder's token is stale) and one `update` event is written with `x_event_type: lease_expired`, actor `system:lease-expiry` and the lapsed worker as `x_client_actor`. The hourly cron releases the lapsed claims of idle trackers the same way. `claimNextIssue` still scans expired in-progress rows. An in-progress row with no lease at all (a status set by hand before this rule, an import) holds nobody: any caller may claim or change it, and it is reported as `x_claim.state: unleased`.
 - **Claims migration (once).** The first activation after the claim lock arrived released every lock that predates real claims: an assignee on a non-closed, non-pinned issue that no live lease holds (a Dolt-era import, a hand-set assignee, a long-expired lease). Only the lock state changed (assignee, lease, heartbeat and holder cleared, fencing raised, a `claim_migrated` event that keeps the cleared assignee as `x_client_actor`); the issue's content and status are untouched, so a task set in progress by hand stays in progress and is simply unleased, and a closed issue keeps its assignee as history. Allocations made after the migration are not touched. The counts per tracker are in the `claims_migrated` log line and in `meta`.
@@ -145,7 +145,7 @@ Work on an issue is locked by a **claim**: status `in_progress`, an assignee (th
 A claim is *held* while the issue is `in_progress`, has an assignee and has a lease; it is *live* until `lease_expires_at`. Claim-sensitive changes are: a `status` or `assignee` change through `updateIssue`, `closeIssue` and `releaseIssue`, and (with the same `claimed_by_other` refusal, but no fencing token and no override) a claim and a heartbeat. Content edits (title, description, notes, priority, labels, parent), comments and dependency changes are not claim-sensitive, as upstream: any caller may make them (a presented fencing token is still checked). A non-holder's edit neither takes nor renews the claim; the live holder's own content edit or comment renews its lease. Naming the assignee a row already has changes nothing. The claim-sensitive changes go through one guard, in this order:
 
 1. A presented `x_fencing_token` (accepted on `updateIssue`, `closeIssue` and `releaseIssue`) that is not the issue's current number is `409 precondition_failed`, `param: x_fencing_token`, `reason: stale_claim`, with the members `x_fencing_token` (presented) and `x_current_fencing_token`.
-2. While the claim is live and held by another worker or principal, the change is `409 already_claimed` with `reason: claimed_by_other`, `assignee`, `x_claimed_by`, `x_same_principal`, `x_lease_expires_at` and `issue_status`, and a detail that names the holder, the expiry and what to do. The overrides are the ones upstream already has: `force` on release and `force_assignee_transfer` on update, and on release a supervisor with the same credential that names the holder in `expected_assignee` (a stale name is `precondition_failed`).
+2. While the claim is live and held by another worker or principal, the change is `409 already_claimed` with `reason: claimed_by_other`, `assignee`, `issue_id`, `x_claimed_by`, `x_same_principal`, `x_lease_expires_at` and `issue_status`, and a detail that names the issue, the holding worker (and its verified principal when that differs), the lease expiry with the time left, and only routes that work in this store: repeat the request as the holding worker (`--actor`), wait for the lease to lapse, have the holder finish or release (`bd unclaim <id>`), or, for an abandoned claim, `bd unclaim <id> --force`. Refusals of an issue merely assigned to another name also carry `issue_id` and name the same routes. `bd` shows this detail as the error text. The overrides are the ones upstream already has: `force` on release and `force_assignee_transfer` on update, and on release a supervisor with the same credential that names the holder in `expected_assignee` (a stale name is `precondition_failed`).
 3. Once the lease has expired the issue is released before the request runs, so anyone may act, and the fencing number was raised by that release; an override of a live claim raises it too.
 
 The holder may change `assignee` and `status` on its own live claim through `updateIssue` without `force_assignee_transfer`: a new assignee hands the claim to that name (new lease, new fencing number). Without a token and without a live foreign claim, upstream behavior applies unchanged. Closing an already closed issue is idempotent and raises nothing.
@@ -299,7 +299,7 @@ guard; existing unguarded imports and clients keep their previous behavior.
 The guard does not restore source event sequence numbers, fencing tokens, verified claim principals,
 idempotency receipts, API keys, OAuth grants or Worker secrets. A logical snapshot archives the source
 journal separately and recovery produces new import events. See [operations.md](operations.md) for
-quiescence, private custody, lease handling, batch limits and the distinction from object-wide PITR.
+quiescence, private storage of archives, lease handling, batch limits and the distinction from object-wide PITR.
 
 ### Bulk export (`profile.issues_export`, `profile.dependencies_export`, scope `beads:read`)
 
@@ -531,8 +531,9 @@ only after semantic readback. Inspect uncertain operations before another mutati
 
 Authenticated HTTP context and MCP `tracker_context` expose `x_identity` with the
 caller's verified subject/email/name/kind, separately asserted `worker_actor` and
-authorized tracker list. HTTP context carries credential expiry when the auth provider
-supplies it. No token is returned. MCP writes accept `worker_actor` for allocation and
+authorized tracker list. HTTP context carries the OAuth token's expiry when the auth
+provider supplies it. HTTP context, MCP context and portfolio identity carry a key's
+stored expiry; a key that never expires carries none. No token is returned. MCP writes accept `worker_actor` for allocation and
 provenance, like the native actor and `X-Beads-Agent` header. It never changes the
 verified principal used by authorization and claim guards.
 
@@ -559,7 +560,8 @@ as empty. Reads are fresh and revision-stable within each tracker, not atomic ac
 trackers. HTTP responses have `Cache-Control: no-store`.
 
 Native ready membership keeps its existing semantics. Actionability separately
-excludes waiting labels, planning containers, active claims, held repositories and
+excludes waiting labels (`PORTFOLIO_LABELS.conventions.waiting_labels`, default
+`blocked-*`, see [dashboard.md](dashboard.md)), planning containers, active claims, held repositories and
 unsupported foreign blockers, and explains each exclusion. Hierarchy and foreign
 references have resolution/status metadata. Cross-tracker references remain
 informational to the native scheduler. Claim a selection through the governed writer
@@ -616,4 +618,17 @@ operations/{operation_id}` returns its original plan and a bounded page of commi
 in the tracker. Plan bodies may contain sensitive data and must not be logged.
 All operation access requires current write authorization and is bound to the
 principal and tracker. Operation records do not expire with ordinary seven-day
-idempotency receipts. Logical snapshot v1/v2 excludes these plans/results, the incremental analysis fences and `terminal_backup_revision/` scheduler watermarks; logical restore requires a fresh analysis checkpoint and never resumes an archived operation. Preserve operation custody through the existing Durable Object or an admitted provider-level recovery; see [operations](operations.md). Capability: `profile.durable_operations_v1`.
+idempotency receipts. Logical snapshot v1/v2 excludes these plans/results, the incremental analysis fences and `terminal_backup_revision/` scheduler watermarks; logical restore requires a fresh analysis checkpoint and never resumes an archived operation. To keep operation records, preserve the existing Durable Object or use Cloudflare's whole-object recovery; see [operations](operations.md). Capability: `profile.durable_operations_v1`.
+
+### Trusted merge closure
+
+`POST /t/{tracker}/v0/beads/issues/{id}:mergePermit` requires ordinary write authority and
+the current verified holder's worker for a live lease. It signs a seven-day permit for the
+exact published repository/head and issue/fence; it changes no issue or claim.
+The separate main-source-bound GitHub merge exchange binds a thirty-minute
+`beads:merge-close` key to one proof digest. Only `issues/{id}:close` accepts that scope,
+requires the signed permit and current revision, and records the member's merged source SHA.
+It cannot force blockers, children, release or another implementation claim. An unclaimed
+permit also requires the original issue revision. A delegated close advances the fence,
+so a reopened issue cannot reuse it. Missing permits fail closed. Ordinary closes keep their
+normal claim protection. Deployment and next scheduled-slot confirmation are later acceptance.

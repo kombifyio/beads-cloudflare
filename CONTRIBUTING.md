@@ -1,11 +1,49 @@
 # Contributing
 
-Use [public issues](https://github.com/kombifyio/beads-cloudflare/issues) for reproducible bugs, documentation problems and focused feature proposals. Include the release, operating system, relevant command, expected result and redacted actual result. Report vulnerabilities through [SECURITY.md](SECURITY.md).
+Thank you for helping. Please read the [code of conduct](CODE_OF_CONDUCT.md) first.
 
-This repository is a published source mirror. Public pull requests are welcome; maintainers integrate accepted changes into the maintained source and publish them through the same reviewed release process. A public pull request may therefore close with a reference to the published change instead of being merged directly into this mirror.
+## How this repository works
 
-Keep changes aligned with the declared [HTTP profile](docs/profile.md), [upstream semantics](docs/semantics.md) and [compatibility rules](docs/compatibility.md). Describe the user-visible behavior and the smallest verification that demonstrates it. Prove behavior end to end: run the affected command against an explicitly authorized hosted test store and report the observed result. Add a unit test only for a sensitive boundary (authentication, credentials, recovery); a fixed defect gets an end-to-end assertion instead; avoid tests that only assert source text or file layout.
+This public repository is a **release mirror**. The maintainers develop in their own source tree and publish each
+release here as one commit, `Release vX.Y.Z`, with the tags `vX.Y.Z` and `bd/vX.Y.Z`. Pull requests are welcome all the
+same: when one is accepted, the maintainers apply it to their source tree with a `Co-authored-by` trailer that credits
+you, and it appears here with the next release. The pull request is then closed with a note that names the release; it
+is not merged into this mirror directly.
 
-Start with `pnpm install --frozen-lockfile`, `pnpm typecheck` and `pnpm test:cli`. Read [artifact builds](docs/artifacts.md) before changing native packaging. Tests that access a tracker require an explicitly authorized hosted test store, scoped test credentials and cleanup of their own fixtures. Never use an operator's identity or someone else's tracker as test data.
+## Issues
 
-Contributions are provided under this project's [MIT license](LICENSE). Preserve third-party notices and document new distributed dependencies in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Use [public issues](https://github.com/kombifyio/beads-cloudflare/issues) for reproducible bugs, documentation problems,
+focused feature proposals and questions; the issue forms ask for what the maintainers need. Include the release,
+operating system, relevant command, expected result and redacted actual result. Report vulnerabilities privately as
+described in [SECURITY.md](SECURITY.md), never in a public issue.
+
+## Pull requests
+
+Keep changes aligned with the declared [HTTP profile](docs/profile.md), [upstream semantics](docs/semantics.md) and
+[compatibility rules](docs/compatibility.md). Describe the user-visible behaviour and the smallest verification that
+demonstrates it, and add an entry under `Unreleased` in [CHANGELOG.md](CHANGELOG.md).
+
+The checks of every pull request run without secrets (`.github/workflows/ci.yml`). Run them locally first:
+
+```sh
+pnpm install --frozen-lockfile
+node scripts/sync-version.mjs --check
+pnpm typecheck
+node --test scripts/import-prefix.test.mjs
+node --test "test/*.pure.test.mjs"
+pnpm test:cli
+(cd bd && go vet ./... && go test ./...)
+```
+
+`pnpm test` runs the Worker tests in the local Workers runtime. To prove a change end to end, deploy it to a store in
+your own Cloudflare account (see [SETUP.md](SETUP.md)) or run it locally with `pnpm dev`, use a scratch tracker, and
+report what you observed. Never use someone else's store, tracker or credentials as test data.
+
+Prefer an end-to-end check over a new unit test; add a unit test for authentication, credentials or recovery, where a
+regression would be a security or data-loss problem. Avoid tests that only assert source text or file layout. Read
+[artifact builds](docs/artifacts.md) before changing native packaging.
+
+## Licence
+
+Contributions are provided under this project's [MIT licence](LICENSE). Preserve third-party notices and document new
+distributed dependencies in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

@@ -5,13 +5,14 @@ import { portfolioCatalog } from "../dashboard/catalog";
 import { mapBounded, type Repository } from "../dashboard/data";
 import type { IssueWithCounts, Comment } from "../tracker/model";
 import type { TeamStore } from "../tracker/team-store";
+import { portfolioLabels, waitingLabel } from "../dashboard/labels";
 import { projectWork } from "./policy.mjs";
 
 export type WorkIssue = IssueWithCounts & { status: string; comments?: Comment[]; revision?: string; x_claim?: unknown };
 export type StoreRead = { kind: "ok"; tracker: string; repository: string; revision: number; read_at: string; issues: WorkIssue[]; ready_ids: string[]; identity: ReturnType<typeof inspectIdentity> }
   | { kind: "inaccessible" | "unavailable"; tracker: string; repository: string; reason: string; read_at: string };
 export interface PortfolioDeps { store: DurableObjectStub<TeamStore>; principal: Principal }
-export interface WorkOptions { trackers?: string[]; worker?: string; allowSharedRepo?: boolean; limit?: number; repositoryOrder?: string[]; sharedRepository?: string }
+export interface WorkOptions { trackers?: string[]; worker?: string; allowSharedRepo?: boolean; limit?: number; repositoryOrder?: string[]; sharedRepository?: string; isWaiting?: (label: string) => boolean }
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid tracker response");
@@ -66,5 +67,7 @@ export async function collectWork(deps: PortfolioDeps, env: Env, options: WorkOp
   const requested = options.trackers ?? catalog.filter(repo => trackerAllowed(deps.principal, repo.tracker)).map(repo => repo.tracker);
   const selected = [...new Set(requested)].map(tracker => catalog.find(repo => repo.tracker === tracker) ?? { id: tracker, name: tracker, tracker, group: "Requested" });
   const stores = await mapBounded(selected, repo => readStore(deps, repo));
-  return { ...projectWork(stores, catalog, options), identity: inspectIdentity(deps.principal, options.worker) };
+  const { conventions } = portfolioLabels(env);
+  const isWaiting = (label: string) => waitingLabel(conventions, [label]) !== null;
+  return { ...projectWork(stores, catalog, { isWaiting, ...options }), identity: inspectIdentity(deps.principal, options.worker) };
 }

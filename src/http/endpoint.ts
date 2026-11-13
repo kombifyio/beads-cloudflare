@@ -1,6 +1,8 @@
 // The tracker HTTP API: /t/{tracker} + the upstream /v0 path. A declared profile of the bd serve contract.
 import { scopeRefusal, type ApiContext } from "../auth/provider";
-import { trackerAllowed } from "../auth/scopes";
+import { trackerAllowed, effectiveScopes } from "../auth/scopes";
+import { SCOPE_MERGE_CLOSE, mergeReason, signMergePermit, verifyMergeProof, verifyMergeCredential } from "../auth/merge-close";
+import { z } from "zod";
 import { forbiddenTracker, NO_SUCH_ROUTE, problemOut, Refusal, invalid, rejectedWrite } from "../tracker/problem";
 import { inspectIdentity } from "../auth/identity";
 import type { Out } from "../tracker/problem";
@@ -17,10 +19,17 @@ const BODY_LIMIT = 1 << 20;
 const LARGE_BODY_LIMIT = 4 << 20;
 const IMPORT_BODY_LIMIT = 16 << 20;
 const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,255}$/;
+const OPERATION_UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+// An operation-bound key is `<label>-<operation UUID>-<request>`. The label is a short
+// lowercase word without a hyphen, so the UUID sits at one fixed place and every bound
+// key names exactly one operation: no label can make a key read as another operation's.
+const OPERATION_KEY = /^[a-z][a-z0-9]{0,15}-([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})-/;
 
 type Route =
   | { kind: "health" }
   | { kind: "context" }
+  | { kind: "permit"; id: string }
+  | { kind: "settlement"; id: string }
   | { kind: "read"; op: ReadOp; id?: string; scope?: "import" | "write" }
   | { kind: "write"; op: WriteOp; id?: string; large?: boolean; bodyless?: boolean; scope?: "import" };
 
@@ -38,6 +47,8 @@ export function route(method: string, path: string): Route | undefined {
   if (path === "/healthz") return method === "GET" ? { kind: "health" } : undefined;
   if (!path.startsWith("/v0/beads/")) return undefined;
   const rest = path.slice("/v0/beads/".length);
+  const settlement = /^write-operations\/([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})(:settle)?$/.exec(rest);
+  if (settlement && ((!settlement[2] && method === "GET") || (settlement[2] && method === "POST"))) return { kind: "settlement", id: settlement[1]! };
   const fixed: Record<string, Partial<Record<string, Route>>> = {
     context: { GET: { kind: "context" } },
     ready: { GET: { kind: "read", op: "listReadyWork" } },
@@ -95,6 +106,8 @@ export function route(method: string, path: string): Route | undefined {
     if (m[2] && method === "POST") return { kind: "write", op: "advanceOperation", id: operationId };
     return undefined;
   }
+  m = /^issues\/([^/]+):mergePermit$/.exec(rest);
+  if (m && method === "POST" && decode(m[1]!) !== undefined) return { kind: "permit", id: decode(m[1]!)! };
   m = /^issues\/([^/]+)\/comments$/.exec(rest);
   if (m) return method === "POST" && decode(m[1]!) !== undefined ? { kind: "write", op: "addComment", id: decode(m[1]!) } : undefined;
   m = /^issues\/([^/]+)\/related$/.exec(rest);
@@ -346,7 +359,10 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
 
   // The import route is gated twice: `merge` mode is an ordinary write (beads:write); `replace` mode, which
   // rewrites history, also needs beads:import. The mode is in the body, so the second check follows the read.
-  const refusedScope = scopeRefusal(ctx, matched.kind === "write" || (matched.kind === "read" && matched.scope === "write"), matched.kind === "read" && matched.scope === "import");
+  const mergeClose = effectiveScopes(ctx.props, ctx.auth.scope).includes(SCOPE_MERGE_CLOSE);
+  const restrictedClose = mergeClose && matched.kind === "write" && matched.op === "closeIssue";
+  const restrictedSettlement = mergeClose && matched.kind === "settlement";
+  const refusedScope = scopeRefusal(ctx, !(restrictedClose || restrictedSettlement) && (matched.kind === "write" || matched.kind === "permit" || matched.kind === "settlement" || (matched.kind === "read" && matched.scope === "write")), matched.kind === "read" && matched.scope === "import");
   if (refusedScope) return refusedScope;
   const importScope = matched.kind === "write" && matched.scope === "import" ? scopeRefusal(ctx, true, true) : undefined;
   if (!trackerAllowed(ctx.props, tracker)) return respond(forbiddenTracker(tracker), requestId);
@@ -375,6 +391,24 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
     }
 
     const store = storeFor(env);
+    if (matched.kind === "settlement") {
+      new Query(url.searchParams).finish();
+      return respond(await store.settleWrite({ ...base, id: matched.id }, request.method === "POST"), requestId);
+    }
+    if (matched.kind === "permit") {
+      new Query(url.searchParams).finish();
+      const input = z.strictObject({ repository: z.string(), head: z.string().regex(/^[0-9a-f]{40}$/), worker: z.string().min(1) }).safeParse(await readBody(request, 4096));
+      if (!input.success) throw invalid(undefined, "Merge permit needs repository, exact head and current worker.");
+      const out: Out = await store.read("getIssue", { ...base, id: matched.id, get: {} });
+      const issue = z.object({ revision: z.string(), status: z.string(), x_claim: z.object({ state: z.string(), verified_principal: z.string().nullable(), assignee: z.string(), fencing_token: z.number().int() }) }).safeParse(out.body);
+      if (out.status !== 200 || !issue.success || issue.data.status === "closed") throw invalid(undefined, "Merge permit requires a current open issue.");
+      const claim = issue.data.x_claim;
+      if (claim.state === "live" && (claim.verified_principal !== principal.sub || claim.assignee !== input.data.worker)) throw invalid(undefined, "Only the current verified holder and worker can delegate this claim.");
+      // Repository mapping is checked again at exchange; this route delegates no tracker write.
+      const permit = await signMergePermit(env.COOKIE_ENCRYPTION_KEY, { ...input.data, tracker, id: matched.id,
+        principal: principal.sub, fence: claim.fencing_token, revision: issue.data.revision, expires: Date.now() + 7 * 86400_000 });
+      return respond({ status: 200, body: { permit } }, requestId);
+    }
     if (matched.kind === "read") {
       return respond(await store.read(matched.op, readCall(matched.op, matched.id, url, base)), requestId);
     }
@@ -392,6 +426,15 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
     const body = matched.bodyless ? {} : await readBody(request, matched.scope === "import" && !importScope ? IMPORT_BODY_LIMIT : matched.large || matched.scope === "import" ? LARGE_BODY_LIMIT : BODY_LIMIT);
     if (importScope && body.mode !== "merge") return importScope;
 
+    let mergePermit: Call["mergePermit"];
+    if (restrictedClose) {
+      const verified = await verifyMergeProof(env.COOKIE_ENCRYPTION_KEY, body.x_merge_proof);
+      await verifyMergeCredential(principal, verified.proof);
+      if (verified.proof.tracker !== tracker || verified.proof.id !== matched.id || body.reason !== mergeReason(verified.proof) ||
+          typeof body.expected_version !== "string" || body.force !== undefined || body.x_fencing_token !== undefined) throw invalid(undefined, "Merge close must match the exact permitted target, reason and revision without force.");
+      mergePermit = verified.permit;
+    } else if (body.x_merge_proof !== undefined) throw invalid(undefined, "Merge proof requires the dedicated merge-closure credential.");
+
     let idem: Call["idem"];
     const key = request.headers.get("Idempotency-Key");
     if (key !== null) {
@@ -399,8 +442,10 @@ export async function handleTracker(request: Request, env: Env, ctx: ApiContext)
       const canonical = canonicalJson({ method: request.method, path: url.pathname, query: [...url.searchParams], ifMatch, body });
       idem = { key, hash: await sha256Hex(canonical) };
     }
+    const operationId = request.headers.get("X-Beads-Operation");
+    if (operationId !== null && (!OPERATION_UUID.test(operationId) || key?.match(OPERATION_KEY)?.[1] !== operationId)) throw invalid("X-Beads-Operation", "Operation UUID must match the Idempotency-Key prefix.");
     const preserveProvenance = matched.scope === "import" && !importScope;
-    const out = await store.write(matched.op, { ...base, id: matched.id, body, filter, ifMatch, idem, preserveProvenance });
+    const out = await store.write(matched.op, { ...base, id: matched.id, body, filter, ifMatch, idem, operationId: operationId ?? undefined, preserveProvenance, mergePermit });
     return respond(out, requestId);
   } catch (e) {
     if (e instanceof Refusal) return respond(matched.kind === "write" ? rejectedWrite(e.out) : e.out, requestId);

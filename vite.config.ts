@@ -37,6 +37,8 @@ export default defineConfig(({ mode }) => {
         miniflare: {
           // The pool's bundled workerd is older than the deployed compatibility date.
           compatibilityDate: "2026-08-01",
+          // The scheduled backup writes its archives and its progress record to this private bucket.
+          r2Buckets: ["BACKUP_BUCKET"],
           bindings: {
             // Test identity provider: Cloudflare Access is stubbed through fetchMock.
             PUBLIC_ORIGIN: "https://beads.test",

@@ -129,3 +129,20 @@ test("a killed credential writer leaves a provably dead lock that the next write
     assert.equal(readGithubCredentials(file).recovered, true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// Sensitive boundary: a refusal is reported as the store's policy decision with its own detail, never as a revoked
+// login, and the detail cannot echo the supplied identity.
+test("a refused exchange shows the store's refusal detail without calling the identity revoked", async () => {
+  const env = { GH_TOKEN: "identity-fixture", BEADS_CLOUDFLARE_TRUSTED_ORIGINS: base };
+  const detail = "The workflow \"other.yml\" is not admitted for this route. identity-fixture";
+  const fetchImpl = async () => Response.json({ status: 403, code: "forbidden", detail }, { status: 403 });
+  await assert.rejects(resolveGithubCredential({ base, repository, tracker, env, fetchImpl }), (error) => {
+    assert.match(error.message, /HTTP 403\): the store did not admit this GitHub identity/);
+    assert.match(error.message, /Store says: The workflow "other\.yml" is not admitted/);
+    assert.doesNotMatch(error.message, /revoked|expired|identity-fixture/);
+    return true;
+  });
+  const jwt = await resolveGithubCredential({ base, repository, tracker, env: { ...env, GH_TOKEN: "head.payload.signature" },
+    fetchImpl: async () => new Response("not json", { status: 401 }) }).catch((error) => error);
+  assert.match(jwt.message, /HTTP 401\): the store did not admit this GitHub Actions identity/);
+});

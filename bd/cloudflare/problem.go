@@ -153,6 +153,11 @@ func problemSentinel(p *Problem) error {
 		if holder != "" {
 			msg = fmt.Errorf("%w by %s", inner, holder)
 		}
+		// The Worker's detail names the holder, the lease and the routes that work in this
+		// store; keep it so the caller sees it instead of a bare sentinel.
+		if detail != "" {
+			msg = fmt.Errorf("%w: %s", inner, detail)
+		}
 		return &issueops.ClaimConflictError{IssueID: str(p.IssueID), Assignee: holder, Err: msg}
 	case p.Code == "not_claimable":
 		status := str(p.IssueStatus)

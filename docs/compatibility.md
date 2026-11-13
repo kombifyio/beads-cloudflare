@@ -75,9 +75,46 @@ the update line above instead of failing in some later request.
 
 ## The setup tool
 
-`npx github:kombifyio/beads-cloudflare doctor` checks the actual first `bd` on PATH,
+`npx --yes beads-cloudflare doctor` checks the actual first `bd` on PATH,
 reads authenticated tracker context and runs `bd --readonly ready --json`. The binary
 performs its full compatibility handshake, including required capabilities; a failed
 read fails readiness. Default doctor does not write tracker records. `--scratch`
 explicitly opts into a create, read, close and delete round trip with a credential
 authorized for scratch trackers. See [`SETUP.md`](../SETUP.md).
+
+## Compatibility with upstream Beads
+
+This project builds on a pinned upstream release; it does not fork upstream.
+
+| | Version |
+|---|---|
+| Upstream Beads | `v1.3.4` (`bd/go.mod`, [`spec/upstream/SOURCE.md`](../spec/upstream/SOURCE.md) with its commit) |
+| This project (store, backend, setup tool) | the `VERSION` file; `bd --version` prints `<upstream>+cloudflare.<VERSION>` |
+
+**What the `bd` binary is.** `scripts/build-bd.sh` checks out upstream at the pinned tag and commit, leaves its source
+unchanged, adds one blank import of this repository's Go module (`bd/`) to register the `cloudflare` backend, applies
+the declared dependency overlay of `spec/upstream/build-overlay.json` and builds the CGO-free flavour upstream ships
+(`-tags gms_pure_go`). Every `bd` command keeps its upstream behaviour; the backend decides only where the data lives.
+The store implements upstream's `bd serve` `/v0` HTTP contract as a declared [profile](profile.md); the contract file
+is vendored unchanged.
+
+**What the profile does not implement.** The backend refuses, with an error that names the reason, what has no
+meaning against a remote store or no route in the profile: the version-control and sync surfaces of Dolt (44
+methods: history, branches, remotes, push and pull, federation, compaction, fast statistics), 21 methods outside `/v0` (merge slots, molecule progress, wisp listing and promotion, provenance events,
+bulk delete variants, dependent counts by status, re-keying an issue id, so `bd rename`), and `bd import` against a
+store without merge import. [bd-backend.md](bd-backend.md#what-is-refused-and-why) lists every refusal.
+
+**Known differences you will see.**
+
+- `bd doctor` reports `Database: No dolt database found`. Upstream's doctor opens a Dolt store for that check whatever
+  backend the workspace selects, so it cannot see this one; the rest of its report is real. Use the setup tool's
+  `doctor` (`npx --yes beads-cloudflare doctor`, above) to check a workspace that uses this backend. A fix
+  is proposed upstream ([upstream proposals](upstream-proposals.md)).
+- A tracker is one Beads project with one issue prefix. `bd create --parent <id>` with a parent from another prefix
+  (another tracker) is refused before anything is created: a parent must be an issue of the same tracker. Dependencies
+  on other prefixes and `external:` references are kept, as upstream keeps them, but never block.
+- Closing an issue that still has open `parent-child` children is refused (`409 not_closable`, member
+  `open_children`), as upstream refuses it; a forced close (`force`) closes it anyway. Parents and epics are never closed
+  automatically. This is upstream's rule, kept on purpose, not a missing feature.
+
+[semantics.md](semantics.md) states every upstream rule the store reproduces, with its upstream source location.

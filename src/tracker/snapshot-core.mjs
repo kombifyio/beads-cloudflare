@@ -11,6 +11,14 @@ export const SNAPSHOT_MAX_BYTES = 64 << 20;
 export const SNAPSHOT_PART_BYTES = 8 << 20;
 export const SNAPSHOT_RESIDENT_BYTES = 32 << 20;
 export const SNAPSHOT_EXCLUSIONS = ["api-keys", "oauth-kv-grants", "worker-secrets", "claim-principals-and-fencing", "idempotency-receipts"];
+/**
+ * The tracker was written while it was being read. This is contention, not damage: no archive was written
+ * and a later read, taken while no writer is active, can succeed. Callers retry it; every other error is a failure.
+ */
+export class SnapshotChangedError extends Error {
+  constructor(message) { super(message); this.name = "SnapshotChangedError"; }
+}
+
 const DERIVED = new Set(["x_claim", "is_blocked", "dependency_count", "dependent_count", "comment_count", "parent", "revision", "comments_omitted", "lease_granted_node", "dependents", "epic_total_children", "epic_closed_children", "epic_closeable"]);
 const RECORD_SECTIONS = ["issues", "dependencies", "memories", "settings"];
 const PREFIX = "snapshots/";
@@ -223,7 +231,7 @@ async function walk(request, tracker, { byteLength, eventLimit = 10, sha256, cap
   if (spilled) await sealOpen();
   const after = await request(tracker, "/context");
   if (before.x_mutation_revision !== after.x_mutation_revision || before.project_id !== after.project_id ||
-      before.x_store_version !== after.x_store_version || before.x_source_sha !== after.x_source_sha) throw new Error("tracker changed during snapshot; stop all writers before retrying a read");
+      before.x_store_version !== after.x_store_version || before.x_source_sha !== after.x_source_sha) throw new SnapshotChangedError("tracker changed during snapshot; stop all writers before retrying a read");
   const capture = spilled ? null : {
     context: after,
     state: stateFrom(after.project_id, retained.issues, retained.dependencies, retained.memories, retained.settings, retainedVocabulary ?? { statuses: [], types: [] }),
@@ -266,11 +274,13 @@ const payloadFrom = (tracker, capture, origin, capturedAt) => ({
   exclusions: SNAPSHOT_EXCLUSIONS,
 });
 
+const changed = () => { throw new SnapshotChangedError("complete semantic snapshot changed across repeated reads; no archive was written"); };
+
 /** Two identical complete reads, as one in-memory archive payload. Throws once the journal or state exceeds the resident budget. */
 export async function snapshotPayload(request, tracker, { origin, byteLength, eventLimit, now = () => new Date() }) {
   const first = await captureSnapshot(request, tracker, { byteLength, eventLimit });
   const second = await captureSnapshot(request, tracker, { byteLength, eventLimit });
-  if (canonical(first) !== canonical(second)) throw new Error("complete semantic snapshot changed across repeated reads; no archive was written");
+  if (canonical(first) !== canonical(second)) changed();
   return payloadFrom(tracker, second, origin, now().toISOString());
 }
 
@@ -298,12 +308,11 @@ const manifestFrom = (tracker, walked, origin, capturedAt, partBytes) => ({
   exclusions: SNAPSHOT_EXCLUSIONS,
 });
 
-const changed = () => { throw new Error("complete semantic snapshot changed across repeated reads; no archive was written"); };
-
 /**
  * Read a tracker until two passes agree, then emit one v1 archive or a v2 manifest after its parts.
- * `emit` runs only after the two passes agree. A later mismatch calls `abort` with names already emitted
- * and does not emit the manifest. Peak resident data is one part once the tracker no longer fits.
+ * A v1 archive is emitted only after both passes agree. A v2 part is emitted while the second pass verifies it
+ * against the first, and the manifest only after the whole second pass agrees; a mismatch calls `abort` with the
+ * names already emitted and does not emit the manifest. Peak resident data is one part once the tracker no longer fits.
  */
 export async function archiveSnapshot(request, tracker, options) {
   const { origin, byteLength, eventLimit, sha256, emit, abort, now = () => new Date() } = options;
@@ -330,32 +339,34 @@ export async function archiveSnapshot(request, tracker, options) {
       const envelope = { payload, integrity: { algorithm: "sha256", digest } };
       const body = `${JSON.stringify(envelope)}\n`;
       if (byteLength(body) > SNAPSHOT_MAX_BYTES) throw new Error("sealed snapshot exceeds the 64 MiB archive budget");
-      await emit({ role: "archive", name: "archive", envelope, body });
+      // A name is recorded before its upload: an upload that failed after R2 committed it must still be removed.
       names.push("archive");
+      await emit({ role: "archive", name: "archive", envelope, body });
       return { format: SNAPSHOT_FORMAT, digest, bytes: byteLength(body), parts: 1, mutation_revision: second.capture.context.x_mutation_revision, peakResident: Math.max(first.peak, second.peak), journalHead: second.capture.journal.head, accounted: first.accounted };
     }
-    const second = await walk(request, tracker, { ...base, spill: true, residentBytes: 0 });
-    if (planIdentity(first) !== planIdentity(second)) changed();
+    // Two reads, like the single-object path: the first fixes the plan, the second verifies each part against it
+    // as it uploads. A read of a large tracker is long, so a third pass would only widen the window in which a
+    // writer can invalidate it. No manifest is written unless both reads agree.
     let stored = 0;
-    const third = await walk(request, tracker, { ...base, spill: true, residentBytes: 0, onPart: async part => {
-      const expected = second.parts[part.index];
+    const second = await walk(request, tracker, { ...base, spill: true, residentBytes: 0, onPart: async part => {
+      const expected = first.parts[part.index];
       if (!expected || expected.digest !== part.digest || expected.recordsDigest !== part.recordsDigest) changed();
       const body = `${JSON.stringify(part.envelope)}\n`;
       if (byteLength(body) > SNAPSHOT_MAX_BYTES) throw new Error("sealed snapshot exceeds the 64 MiB archive budget");
-      await emit({ role: "part", name: part.name, envelope: part.envelope, body });
       names.push(part.name);
+      await emit({ role: "part", name: part.name, envelope: part.envelope, body });
       stored += byteLength(body);
     } });
-    if (planIdentity(second) !== planIdentity(third)) changed();
+    if (planIdentity(first) !== planIdentity(second)) changed();
     const payload = manifestFrom(tracker, second, origin, capturedAt, partBytes);
     const digest = await sha256(canonical(payload));
     const envelope = { payload, integrity: { algorithm: "sha256", digest } };
     const body = `${JSON.stringify(envelope)}\n`;
     if (byteLength(body) > SNAPSHOT_MAX_BYTES) throw new Error("sealed snapshot exceeds the 64 MiB archive budget");
-    await emit({ role: "manifest", name: "manifest", envelope, body });
     names.push("manifest");
+    await emit({ role: "manifest", name: "manifest", envelope, body });
     stored += byteLength(body);
-    return { format: SNAPSHOT_FORMAT_V2, digest, bytes: stored, parts: second.parts.length, mutation_revision: second.context.x_mutation_revision, peakResident: Math.max(first.peak, second.peak, third.peak), journalHead: second.journalHead, accounted: second.accounted };
+    return { format: SNAPSHOT_FORMAT_V2, digest, bytes: stored, parts: second.parts.length, mutation_revision: second.context.x_mutation_revision, peakResident: Math.max(first.peak, second.peak), journalHead: second.journalHead, accounted: second.accounted };
   } catch (error) {
     await rollback(error);
   }

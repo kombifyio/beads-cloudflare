@@ -44,7 +44,7 @@ export const dashboardScript = String.raw`
       total:'All',open:'Open',in_progress:'In progress',blocked:'Blocked',closed:'Closed',deferred:'Deferred',pinned:'Pinned',active:'Active',completion:'Progress',all:'All',date:'Date',tasks:'Tasks',owner:'Assignee',type:'Type',description:'Description',comments:'Comments',dependencies:'Dependencies',none:'No information',unassigned:'Unassigned',changedAt:'Changed',id:'ID',titleCol:'Title',status:'Status'
     }
   };
-  let language = (navigator.language || 'de').startsWith('en') ? 'en' : 'de';
+  let language = String(navigator.language || 'en').toLowerCase().startsWith('de') ? 'de' : 'en';
   try { const saved = localStorage.getItem('beads.dashboard.language'); if (saved === 'de' || saved === 'en') language = saved; } catch {}
   const DAY = 86400000, NS = 'http://www.w3.org/2000/svg';
   const $ = (id) => document.getElementById(id);

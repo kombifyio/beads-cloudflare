@@ -1,0 +1,19 @@
+name: Question
+description: Ask how to set up, operate or use the store.
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: "Read SETUP.md and docs/ first. Do not include tokens, agent keys or private tracker content."
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What you want to know, and what you already tried.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Release and environment
+      description: Store and bd versions (`bd --version`), operating system and Node version, if relevant.

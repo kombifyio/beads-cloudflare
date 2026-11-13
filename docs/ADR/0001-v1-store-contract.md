@@ -11,8 +11,8 @@ commitment precise; it does not promote the current pre-v1 release, establish
 a live recovery profile or offer a business availability SLA. Implementation
 and operating procedures remain in the linked contracts below.
 
-The current upstream source is Beads **v1.3.1**, commit
-`c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c`, recorded with the upstream OpenAPI
+The current upstream source is Beads **v1.3.4**, commit
+`7ef2fd05eb0cd3bdbde051f93cfc14ccf270cdde`, recorded with the upstream OpenAPI
 digest in [SOURCE.md](../../spec/upstream/SOURCE.md). The native module pins
 that release in [bd/go.mod](../../bd/go.mod). The store implements a declared
 profile, not the entire upstream engine. [profile.md](../profile.md) records
@@ -25,7 +25,7 @@ That is not a full-conformance or v1-readiness claim.
 ### Supported upstream and upgrades
 
 The supported upstream baseline is **only the explicitly pinned and tested
-v1.3.1 source above**. A matching version string alone does not qualify a
+v1.3.4 source above**. A matching version string alone does not qualify a
 different source, another upstream release or every patch on a version line.
 The dependency build overlay is separately pinned and qualified; it does not
 silently change the upstream protocol baseline.
@@ -54,7 +54,7 @@ Protection may be reported only while all of these conditions hold:
 
 - `BACKUP_BUCKET` is configured privately and scheduled capture is operational.
 - A complete snapshot passes integrity and semantic verification, is retained
-  and accessible under the operator's custody, and its `captured_at` age at the
+  and accessible to the operator, and its `captured_at` age at the
   recovery point is no more than 24 hours. Retention or upload time alone does
   not establish freshness.
 - Restorability is proven against the admitted release/profile with an isolated
@@ -103,11 +103,10 @@ that environment and dataset, not a guaranteed future RTO.
 
 ### Immutable release and artifact guarantees
 
-The source, preparation, version and plan identities are authenticated through
-the existing [release admission](../releasing.md). A public tag remains bound
-to its exact captured export commit; the parent receipt retains the admitted
-private source identity. Public and native publication are distinct lanes and
-must not be relabelled as one another's proof.
+Every release is cut from one reviewed source commit. A public tag remains bound
+to its exact exported commit, and the release notes and `SHA256SUMS` name what
+was built from it. The public release and a native `bd` build are distinct
+publications and must not be relabelled as one another's proof.
 
 Both lanes own the complete archive matrix:
 

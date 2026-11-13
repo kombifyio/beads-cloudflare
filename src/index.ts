@@ -2,10 +2,7 @@ import { providerFor } from "./auth/provider";
 import { handleDashboardSession } from "./dashboard/session";
 import { dashboardPage } from "./dashboard/page";
 import { dashboardScript } from "./dashboard/client";
-import { capturePortfolio } from "./dashboard/endpoint";
-import { checkStoreHealth } from "./tracker/health-check";
-import { runScheduledBackup } from "./tracker/backup";
-import { sweepLapsedClaims } from "./tracker/claims-sweep";
+import { dispatchScheduled } from "./scheduled";
 
 export { TeamStore } from "./tracker/team-store";
 
@@ -25,10 +22,7 @@ export default {
     }
     return providerFor(env).fetch(request, env, ctx);
   },
-  async scheduled(_event, env) {
-    // All run every hour; a failing job must not hide the others, so the first error is rethrown last.
-    const results = await Promise.allSettled([sweepLapsedClaims(env), checkStoreHealth(env), capturePortfolio(env), runScheduledBackup(env)]);
-    const failed = results.find((r) => r.status === "rejected");
-    if (failed) throw (failed as PromiseRejectedResult).reason;
+  async scheduled(event, env) {
+    await dispatchScheduled(event.cron, env);
   },
 } satisfies ExportedHandler<Env>;

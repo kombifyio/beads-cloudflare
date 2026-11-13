@@ -58,6 +58,9 @@ function cells(line: string): string[] {
   return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => plain(cell));
 }
 
+const PHASE_META = /(?:^(?:[-*]\s+)?|[|;]\s*)Phase:\s*([A-Za-z0-9][A-Za-z0-9_-]{0,31})/i;
+const PHASE_ALIAS = /\bCentral:\s*([A-Za-z0-9][A-Za-z0-9_-]{0,31})/i;
+
 /**
  * Milestones in version order with their task-list deliverables. A deliverable may say it was
  * pulled forward or deferred; a completed deliverable of a milestone after the current one is
@@ -114,11 +117,12 @@ export function parseRoadmap(markdown: string): ParsedRoadmap {
     header = null;
     if (!section) continue;
     const meta = plain(line);
-    // A phase key (any short token) follows `Central:` anywhere in metadata, or `Phase:` at the start of a line.
-    if (!section.central) section.central = (/\bCentral:\s*([A-Za-z0-9][A-Za-z0-9_-]{0,31})/i.exec(meta) ?? /^(?:[-*]\s+)?Phase:\s*([A-Za-z0-9][A-Za-z0-9_-]{0,31})/i.exec(meta))?.[1] ?? null;
+    // A phase key (any short token) follows `Phase:` at the start of a line or after a `|`/`;` separator in milestone metadata.
+    // `Central:` is accepted anywhere as an alias of `Phase:` for roadmaps that already use it.
+    if (!section.central) section.central = (PHASE_META.exec(meta) ?? PHASE_ALIAS.exec(meta))?.[1] ?? null;
     if (!section.epic) section.epic = /Beads epic:\s*([A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9])/i.exec(meta)?.[1] ?? null;
-    // State is milestone metadata only beside Central/epic or on its own line, never prose.
-    if (!section.state && (/Central:|^(?:[-*]\s+)?Phase:|Beads epic:|^\s*State:/i.test(meta))) section.state = /\bState:\s*([A-Za-z][A-Za-z _-]*)/i.exec(meta)?.[1]?.trim() ?? null;
+    // State is milestone metadata only beside a phase key/epic or on its own line, never prose.
+    if (!section.state && (PHASE_ALIAS.test(meta) || PHASE_META.test(meta) || /Beads epic:|^\s*State:/i.test(meta))) section.state = /\bState:\s*([A-Za-z][A-Za-z _-]*)/i.exec(meta)?.[1]?.trim() ?? null;
     const item = ITEM.exec(line);
     if (item) {
       const body = item[3]!.trim();

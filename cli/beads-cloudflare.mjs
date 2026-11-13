@@ -1,66 +1,85 @@
 #!/usr/bin/env node
-// beads-cloudflare: set up the Cloudflare store for Beads and join it from a repository.
+// beads-cloudflare: a shared Beads tracker in a Cloudflare Worker you own. This CLI creates the store, joins
+// repositories to it, mints keys for teammates and moves existing Beads workspaces in.
 //
-//   npx --yes github:kombifyio/beads-cloudflare setup
-//   npx --yes github:kombifyio/beads-cloudflare join <store url>
-//   npx --yes github:kombifyio/beads-cloudflare doctor
-//   npx --yes github:kombifyio/beads-cloudflare uninstall
+//   npx beads-cloudflare init        (or: npm create beads-cloudflare)
+//   npx beads-cloudflare join <store url>
+//   npx beads-cloudflare dev         (a local store, no Cloudflare account)
 //
-// Plain Node 22+ with no dependencies of its own. Everything in the Cloudflare account goes through the Cloudflare CLI
-// (`cf`, installed and signed in; setup checks it first); `cf deploy` runs the project's pinned Wrangler internally.
+// The package has no runtime dependencies. The deploy tooling (cf and Wrangler, pinned in package.json) is installed
+// into the user cache the first time `setup` or `dev` needs it, so joining a store installs in seconds.
 import { parseArgs } from "node:util";
 import { redact } from "./output.mjs";
-import { CLI_VERSION, bootstrapCommand, credentialsCommand, doctorCommand, joinCommand, setupCommand, uninstallCommand } from "./commands.mjs";
+import { nodeProblem } from "./lib.mjs";
 
-const HELP = `beads-cloudflare ${CLI_VERSION}
+const HELP = `beads-cloudflare: a shared Beads tracker in a Cloudflare Worker you own.
 
-Usage: npx --yes github:kombifyio/beads-cloudflare <command> [options]
+Usage: npx beads-cloudflare <command> [options]
 
-Commands
-  setup               Deploy the store into your Cloudflare account, create the first agent key,
-                      then do everything "join" does for the current directory.
-  join <store url>    Use an existing store from the current directory: install bd, store the key,
-                      write .beads/, run the self-test.
-  bootstrap           Provision an existing clone's credentials and matching bd; preserve repository files.
-  credentials         Resolve credentials without changing storage; --json is for custody callers.
-  doctor              Read-only tracker context, credential and binary readiness. --scratch opts into writes.
-  uninstall           Remove the bd binary and the stored credentials from this machine. The store
-                      and its data are never touched.
+Start
+  init, setup           Create the store in your Cloudflare account (signs in when needed), create the
+                        first agent key, then join the current directory. Safe to run again: it updates.
+  join <store url>      Use an existing store from the current directory: install bd, store the key,
+                        write .beads/, check the setup. Asks for the key, or --token-file <file>.
+  migrate <store url>   Move an existing Beads workspace here into the store: export, back up .beads,
+                        join, import, compare counts.
+  dev                   Run a store on this machine (wrangler dev --local, no account) and join a demo.
 
-Every command is safe to run twice and supports --dry-run (print what would be done).
+Team
+  invite                Create a key for a teammate and print the command they run.
+  keys create <label>   Create an agent key (printed once). --read-only, --import, --trackers a,b, --days n
+  keys list | keys revoke <id>
+  agents claude,codex   Add instructions (CLAUDE.md / AGENTS.md) and the MCP server for coding agents.
+
+Machines
+  bootstrap             A fresh clone of a joined repository: credential, matching bd, readiness check.
+  doctor                Read-only check of bd, the credential and the tracker. --scratch adds a write test.
+  credentials           Resolve the credential without changing anything; --json for a capturing process.
+  mcp                   Stdio MCP server for agents, using the credential bd uses (--store <url>).
+  cf <args>             Run the tested Cloudflare CLI, e.g. "cf auth login".
+  uninstall             Remove bd and, with --store <url> or --all, the stored keys. Never touches the store.
 
 Options
   --dry-run              Print what would be done and change nothing.
-  --tracker <id>         Tracker for this repository (default: derived from the directory name).
-  --token <key>          Agent key for "join" (or BEADS_CLOUDFLARE_TOKEN, or BEADS_ADMIN_TOKEN to ask the store).
-  --github-repository <owner/repo>  Commit repository identity for automatic GitHub exchange.
-  --trust-store          Explicitly trust this origin on this host for GitHub credential exchange.
-  --base <url> --json    credentials: explicit store; output the secret response only for a capturing caller.
-  --scratch              doctor/join: explicitly exercise a scratch write round trip (requires scratch scope).
+  --tracker <id>         Tracker for this repository (default: the directory name; migrate: the old id prefix).
+  --token-file <file>    join/bootstrap: read the agent key from a file (- for standard input).
+  --agents <list>        join/setup: claude, codex, both as "claude,codex", or none.
+  --add-to-path          join/setup: add the bd directory to your shell profile when it is not on PATH.
+  --store <url>          The store, where no .beads/cloudflare.json names it (doctor, keys, invite, mcp, uninstall).
+  --github-repository <owner/repo>  Repository identity for the optional GitHub exchange.
+  --trust-store          Trust this store on this host for the GitHub exchange and ambient keys.
+  --scratch              doctor/join: also run a write round trip in a scratch tracker.
   --name <worker>        setup: Worker name (default beads-cloudflare).
   --origin <url>         setup: a custom domain you route to the Worker.
   --no-join              setup: only deploy the store.
-  --allow-outdated-cf    setup: continue with an older cf than the newest release (offline use; by default an old cf is a failure).
   --admin-email <list>   setup: people allowed to manage keys through sign-in (optional).
-  --github-policy <file> setup: JSON repository-to-tracker policy; omitted policy keeps the deployed value.
+  --github-policy <file> setup: JSON repository-to-tracker policy for the GitHub exchange.
   --access-issuer <url> --access-client-id <id> --access-client-secret <secret>
-                         setup: turn on human sign-in through Cloudflare Access (optional).
-  --bin-dir <dir>        Where bd is installed (default ~/.local/bin, %LOCALAPPDATA%\\Programs\\beads-cloudflare\\bin).
-  --store <url>          doctor: the store to check when no repository is configured; uninstall: the store whose credentials to remove.
-  --all                  uninstall: remove the credentials of every store (without --store or --all they are left).
-  --no-sign-in           setup: deploy without human sign-in (an omitted --admin-email/--access-issuer keeps the last deployment's value).
+                         setup: turn on browser sign-in through Cloudflare Access (optional).
+  --no-sign-in           setup: turn browser sign-in off again.
+  --from <file.jsonl>    migrate: import this export instead of exporting .beads here.
+  --upstream-bd <path>   migrate: the bd that reads the existing workspace (default: the first non-beads-cloudflare bd on PATH).
   --replace-existing-workspace
-                         join: this directory is already a Beads workspace; move .beads to .beads.backup-<time> and start fresh.
-  --bd-from <path>       Development: install this bd binary instead of downloading the release.
-  --release-base <url>   Development: download releases from here instead of GitHub.
-  --bd-path <path>       doctor: test this bd instead of the one on PATH.
+                         join: move an existing .beads aside (to .beads.backup-<time>) and start empty.
+  --tracker/--trackers/--days/--label/--read-only/--import/--all-trackers   keys and invite.
+  --port <n> --dir <dir> dev: local port (8788) and demo directory.
+  --all                  uninstall: remove the keys of every store.
+  --bin-dir <dir>        Where bd is installed (default ~/.local/bin, %LOCALAPPDATA%\\Programs\\beads-cloudflare\\bin).
+  --bd-from <path> --release-base <url> --bd-path <path>   Development: a local bd build or release mirror.
   -h, --help, --version
+
+Environment: BEADS_CLOUDFLARE_TOKEN with BEADS_CLOUDFLARE_BASE (containers and CI), BEADS_ADMIN_TOKEN (keys,
+invite), BEADS_CLOUDFLARE_CF (another cf than the tested one), CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.
 `;
 
 const options = {
   "dry-run": { type: "boolean", default: false },
   tracker: { type: "string" },
+  trackers: { type: "string" },
   token: { type: "string" },
+  "token-file": { type: "string" },
+  agents: { type: "string" },
+  "add-to-path": { type: "boolean", default: false },
   "github-repository": { type: "string" },
   "trust-store": { type: "boolean", default: false },
   base: { type: "string" },
@@ -70,7 +89,6 @@ const options = {
   origin: { type: "string" },
   "no-join": { type: "boolean", default: false },
   "no-sign-in": { type: "boolean", default: false },
-  "allow-outdated-cf": { type: "boolean", default: false },
   all: { type: "boolean", default: false },
   "replace-existing-workspace": { type: "boolean", default: false },
   "admin-email": { type: "string" },
@@ -78,8 +96,17 @@ const options = {
   "access-issuer": { type: "string", default: process.env.ACCESS_ISSUER },
   "access-client-id": { type: "string", default: process.env.ACCESS_CLIENT_ID },
   "access-client-secret": { type: "string", default: process.env.ACCESS_CLIENT_SECRET },
-  "bin-dir": { type: "string" },
+  "bin-dir": { type: "string", default: process.env.BEADS_CLOUDFLARE_BIN_DIR },
   store: { type: "string" },
+  from: { type: "string" },
+  "upstream-bd": { type: "string" },
+  label: { type: "string" },
+  days: { type: "string" },
+  "read-only": { type: "boolean", default: false },
+  import: { type: "boolean", default: false },
+  "all-trackers": { type: "boolean", default: false },
+  port: { type: "string" },
+  dir: { type: "string" },
   "bd-from": { type: "string" },
   "release-base": { type: "string" },
   "bd-path": { type: "string" },
@@ -87,18 +114,32 @@ const options = {
   version: { type: "boolean", default: false },
 };
 
+// The Node rule comes first and stands alone, so an old Node gets one clear line instead of a syntax error later.
+const nodeIssue = nodeProblem(process.versions.node);
+if (nodeIssue) {
+  console.error(`beads-cloudflare: ${nodeIssue}. Install a current Node LTS from https://nodejs.org and run the command again.`);
+  process.exit(1);
+}
+
+// `cf` passes its own arguments through untouched, so they are never parsed as options of this tool.
+if (process.argv[2] === "cf") {
+  const { cfCommandPassThrough } = await import("./commands.mjs");
+  process.exit(await cfCommandPassThrough({}, process.argv.slice(3)));
+}
+
 let parsed;
 try {
   parsed = parseArgs({ options, allowPositionals: true });
 } catch (error) {
-  console.error(`beads-cloudflare: ${redact(error.message)}\n\n${HELP}`);
+  console.error(`beads-cloudflare: ${redact(error.message)}\n\nRun with --help for the options.`);
   process.exit(2);
 }
 const { values: flag, positionals } = parsed;
 const [command, ...rest] = positionals;
 
+const commands = await import("./commands.mjs");
 if (flag.version) {
-  console.log(CLI_VERSION);
+  console.log(commands.CLI_VERSION);
   process.exit(0);
 }
 if (flag.help || !command) {
@@ -106,16 +147,38 @@ if (flag.help || !command) {
   process.exit(command || flag.help ? 0 : 2);
 }
 
-const commands = { setup: setupCommand, join: joinCommand, bootstrap: bootstrapCommand, credentials: credentialsCommand, doctor: doctorCommand, uninstall: uninstallCommand };
-if (!commands[command]) {
-  console.error(`beads-cloudflare: unknown command "${redact(command)}"\n\n${HELP}`);
+const table = {
+  init: commands.setupCommand,
+  setup: commands.setupCommand,
+  join: commands.joinCommand,
+  bootstrap: commands.bootstrapCommand,
+  credentials: commands.credentialsCommand,
+  doctor: commands.doctorCommand,
+  uninstall: commands.uninstallCommand,
+  mcp: commands.mcpCommand,
+  migrate: async (f, args) => (await import("./migrate.mjs")).migrateCommand(f, args),
+  dev: async (f, args) => (await import("./dev.mjs")).devCommand(f, args),
+  keys: async (f, args) => (await import("./keys.mjs")).keysCommand(f, args),
+  invite: async (f, args) => (await import("./keys.mjs")).inviteCommand(f, args),
+  agents: async (f, args) => (await import("./agents.mjs")).agentsCommand(f, args, { findRepoConfig: commands.findRepoConfig, Report: commands.Report, version: commands.CLI_VERSION }),
+};
+if (!table[command]) {
+  console.error(`beads-cloudflare: unknown command "${redact(command)}". Run with --help for the commands.`);
   process.exit(2);
 }
 
 try {
-  process.exitCode = await commands[command](flag, rest);
+  process.exitCode = await table[command](flag, rest);
 } catch (error) {
-  console.error(`\nbeads-cloudflare: FAILED unexpectedly: ${redact(error?.stack ?? error)}`);
-  console.error(`Please report this with the output above: https://github.com/kombifyio/beads-cloudflare/issues`);
+  // mcp speaks JSON-RPC on standard output; its diagnostics go to standard error like everyone's errors here.
+  const out = command === "mcp" ? console.error : console.log;
+  if (error instanceof commands.Diagnosed) {
+    out(`  ${"FAILED".padEnd(7)} ${redact(`${error.label}: ${error.message}`)}`);
+    for (const line of [error.fix].flat().filter(Boolean)) out(`          ${redact(`fix: ${line}`)}`);
+    out(`\nbeads-cloudflare: FAILED (1 problem in ${command}). Apply the fix line above, then run the command again.`);
+  } else {
+    console.error(`\nbeads-cloudflare: FAILED unexpectedly: ${redact(error?.stack ?? error)}`);
+    console.error(`This is a defect. Please report it with the output above: https://github.com/kombifyio/beads-cloudflare/issues`);
+  }
   process.exitCode = 1;
 }

@@ -1,11 +1,10 @@
 // Deployment configuration of the store, in the format `cf build` and `cf deploy` read.
-// `npx github:kombifyio/beads-cloudflare setup` (cli/) deploys this file with `cf deploy` and passes
+// `npx --yes beads-cloudflare setup` (cli/) deploys this file with `cf deploy` and passes
 // the account-specific values through the BEADS_* environment variables below; do not put account
 // values in this file. Without them it describes a valid but unusable template.
 //
-// wrangler.jsonc stays next to it for source type generation and deployment-template checks.
-// Runtime acceptance uses the explicitly admitted hosted store, never a local database.
-// Keep the templates in step: scripts/check-deploy-config.mjs compares them.
+// wrangler.jsonc stays next to it for source type generation, local development and tests.
+// Keep the two in step: scripts/check-deploy-config.mjs compares them.
 import { defineConfig, bindings, exports, triggers } from "cf/config";
 import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
 
@@ -28,6 +27,10 @@ export default defineConfig({
       OAUTH_KV: bindings.kv({ id: process.env.BEADS_KV_ID || "00000000000000000000000000000000" }),
       // One TeamStore Durable Object per team name; phase 1 has the single team "default".
       TEAM_STORE: bindings.durableObject({ worker: name, exportName: "TeamStore" }),
+      // Optional JSON { hour?, retention_days?, late_tracker_prefixes? } for the scheduled backup. Empty: the defaults.
+      BACKUP_POLICY: bindings.text(process.env.BEADS_BACKUP_POLICY || ""),
+      // Optional "|"-separated extra cron expressions that run only the backup sweep. Empty: none.
+      BACKUP_SWEEP_ONLY_CRONS: bindings.text(""),
       TEAM: bindings.text("default"),
       PORTFOLIO_TITLE: bindings.text(process.env.BEADS_PORTFOLIO_TITLE || "Beads portfolio"),
       PORTFOLIO_REPOSITORIES: bindings.text(process.env.BEADS_PORTFOLIO_REPOSITORIES || ""),
@@ -39,8 +42,13 @@ export default defineConfig({
       ADMIN_EMAILS: bindings.text(process.env.BEADS_ADMIN_EMAILS ?? ""),
       // Explicit portable repository/tracker grants; empty denies GitHub exchanges.
       GITHUB_REPOSITORIES: bindings.text(process.env.BEADS_GITHUB_REPOSITORIES ?? "{}"),
+      // Compact exact workflow reader/writer grants for mapped repositories; empty: none.
+      GITHUB_WORKFLOW_GRANTS: bindings.text(process.env.BEADS_GITHUB_WORKFLOW_GRANTS ?? ""),
       // Exact App/installation reader allowlist, intersected with the repository/tracker grants.
       GITHUB_READ_APP: bindings.text(process.env.BEADS_GITHUB_READ_APP ?? ""),
+      // Optional { repository, workflow_ref, repository_owner_id }: the one main-branch workflow allowed to close a merged issue
+      // for its claim holder; it intersects the repository/tracker grants. Empty: merge closure is off.
+      GITHUB_MERGE_CLOSER: bindings.text(process.env.BEADS_GITHUB_MERGE_CLOSER ?? ""),
       // Optional generated state page { repository, path, tracker } for the dashboard State view. Empty: none.
       STATE_PAGE: bindings.text(process.env.BEADS_STATE_PAGE ?? ""),
       // Cloudflare Access for SaaS (OIDC) issuer. Empty: sign-in is not configured and only agent API keys work.

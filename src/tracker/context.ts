@@ -4,7 +4,7 @@ import { STORE_VERSION } from "../version";
 type ContextResponse = components["schemas"]["ContextResponse"];
 
 /** The upstream release whose /v0 contract this server profiles. */
-export const UPSTREAM_VERSION = "1.3.1";
+export const UPSTREAM_VERSION = "1.3.4";
 
 // Operation tokens follow the PATH, one per implemented operation; only what is fully implemented is listed.
 const OPERATION_TOKENS = [
@@ -54,7 +54,9 @@ const BEHAVIOR_TOKENS = [
   "profile.analysis_v1",
   "profile.changes_v1",
   "profile.durable_operations_v1",
+  "profile.write_settlement_v1",
   "profile.evidence_v1",
+  "profile.merge_closure_v1",
   "profile.apply_batch_extensions",
   "profile.batch_close_fencing",
   "profile.batch_comment_id",

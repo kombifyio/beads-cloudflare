@@ -113,7 +113,9 @@ function fixture(t) {
   const system = process.platform === "win32" ? [join(process.env.SystemRoot, "System32"), join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0")] : [];
   const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LOCALAPPDATA: join(home, "Local"), XDG_CONFIG_HOME: join(home, ".config") };
   for (const name of Object.keys(env)) if (/^(BEADS_|BD_|ACCESS_|CLOUDFLARE_|GH_TOKEN$|GITHUB_TOKEN$|ACTIONS_ID_TOKEN_REQUEST_)/.test(name)) delete env[name];
-  Object.assign(env, { PATH: [...path, capable, ...system].join(delimiter), BCF_CALLS: calls, BCF_BASE: BASE, BCF_VERSION: VERSION, BCF_AGENT: AGENT, BCF_POLICY: JSON.stringify(POLICY), BCF_READER: JSON.stringify(READER) });
+  // setup runs the tested cf from the deploy tooling unless BEADS_CLOUDFLARE_CF names another; the fixture names the current one.
+  const currentCf = process.platform === "win32" ? join(root, "current", "node_modules", "cf", "bin", "cf") : join(root, "current", "cf");
+  Object.assign(env, { BEADS_CLOUDFLARE_CF: currentCf, PATH: [...path, capable, ...system].join(delimiter), BCF_CALLS: calls, BCF_BASE: BASE, BCF_VERSION: VERSION, BCF_AGENT: AGENT, BCF_POLICY: JSON.stringify(POLICY), BCF_READER: JSON.stringify(READER) });
   return {
     root, cwd, capable, upstream, env,
     run(args, extra = {}) {

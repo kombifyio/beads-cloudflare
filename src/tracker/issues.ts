@@ -451,7 +451,7 @@ export function updateIssue(ctx: Ctx, id: string, body: Json, guards: UpdateGuar
     claiming && !ownsLive && row.assignee !== "" && row.assignee !== claimant && !leaseExpired(row, ctx.now) &&
     row.status !== "in_progress" && row.status !== "closed" && expectedAssignee === undefined && !forceTransfer
   ) {
-    throw refuse("already_claimed", `issue is assigned to "${row.assignee}"; send \`force_assignee_transfer\` to take it over, or have the assignee release it`, { assignee: row.assignee, issue_status: row.status });
+    throw refuse("already_claimed", `issue ${row.id} is assigned to "${row.assignee}" (status ${row.status}), which is not you; start it as that worker (\`--actor ${row.assignee}\`), have the assignee release it (\`bd unclaim ${row.id}\`), or send \`force_assignee_transfer\` on the update to take it over`, { assignee: row.assignee, issue_id: row.id, issue_status: row.status });
   }
 
   // Column changes, validated member by member.

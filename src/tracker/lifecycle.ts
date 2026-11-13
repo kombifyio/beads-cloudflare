@@ -87,7 +87,7 @@ export function claimIssue(ctx: Ctx, id: string, body: Json): Out {
   // A lapsed claim (or a status set by hand, with no lease behind it) holds nobody; an assignment does.
   const lapsed = leaseExpired(row, ctx.now);
   if (row.assignee !== "" && row.assignee !== claimAssignee(ctx) && !lapsed) {
-    throw refuse("already_claimed", "issue is claimed by another actor", { assignee: row.assignee, issue_status: row.status });
+    throw refuse("already_claimed", `issue ${id} is assigned to "${row.assignee}" (status ${row.status}), so ${claimAssignee(ctx)} cannot claim it. Claim it as that worker (\`--actor ${row.assignee}\`), have ${row.assignee} release it (\`bd unclaim ${id}\`), or, if the assignment is abandoned, release it with \`bd unclaim ${id} --force\` and claim it again.`, { assignee: row.assignee, issue_id: id, issue_status: row.status });
   }
   if (row.status !== "open" && !lapsed) {
     throw refuse("not_claimable", "issue is not in a claimable state", { issue_status: row.status });
@@ -250,7 +250,7 @@ export function releaseIssue(ctx: Ctx, id: string, body: Json): Out {
     }
   } else if (!force && !isHolder(ctx, row)) {
     if (liveClaim(row, ctx.now)) throw heldByOther(ctx, row, "release");
-    throw refuse("already_claimed", "this issue is held by another actor; send `force`, or name the holder in `expected_assignee`");
+    throw refuse("already_claimed", `issue ${id} is assigned to "${row.assignee}" without a live claim and this request is not that holder; release it as that worker, send \`force\` (\`bd unclaim ${id} --force\`) for an abandoned assignment, or name the holder in \`expected_assignee\``, { assignee: row.assignee, issue_id: id, issue_status: row.status });
   }
 
   ctx.sql.exec(
@@ -300,7 +300,11 @@ export function closeRow(ctx: Ctx, row: IssueRow, input: CloseInput): { alreadyC
   checkVersion(row, input.expected);
   const alreadyClosed = row.status === "closed";
   if (alreadyClosed && input.token !== undefined && input.token !== row.fencing) throw staleClaim(input.token, row.fencing);
-  const bump = alreadyClosed ? 0 : guardClaim(ctx, row, { token: input.token }, "close");
+  const delegated = ctx.mergePermit && ctx.mergePermit.id === row.id && ctx.mergePermit.tracker === ctx.tracker &&
+    ctx.mergePermit.fence === row.fencing &&
+    (liveClaim(row, ctx.now) ? (ctx.mergePermit.principal === (row.claimed_by || row.assignee) && ctx.mergePermit.worker === row.assignee) : ctx.mergePermit.revision === String(row.version));
+  if (ctx.mergePermit && !delegated) throw refuse("precondition_failed", "The merge permit no longer matches this issue and claim generation.");
+  const bump = alreadyClosed ? 0 : delegated ? 1 : guardClaim(ctx, row, { token: input.token }, "close");
   const children = openChildren(ctx.sql, ctx.tracker, id);
   if (!input.force) {
     if (children > 0) {
@@ -323,7 +327,7 @@ export function closeRow(ctx: Ctx, row: IssueRow, input: CloseInput): { alreadyC
 }
 
 export function closeIssue(ctx: Ctx, id: string, body: Json): Out {
-  checkMembers(body, ["actor", "reason", "session", "force", "expected_version", "x_fencing_token"]);
+  checkMembers(body, ["actor", "reason", "session", "force", "expected_version", "x_fencing_token", ...(ctx.mergePermit ? ["x_merge_proof"] : [])]);
   ctx.clientActor = nameMember(body, "actor");
   const reason = reasonMember(body, "reason");
   const session = reasonMember(body, "session");

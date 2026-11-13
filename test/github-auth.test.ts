@@ -1,9 +1,17 @@
 import { env } from "cloudflare:workers";
 import { reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { mergeReason, type MergeProof } from "../src/auth/merge-close";
 import { call } from "./helpers";
 import { parseKey, reusableKey } from "../src/tracker/keys";
-import { exchangeGithub, githubCredentialExpiry } from "../src/auth/github";
+import { exchangeGithub, githubCredentialExpiry, signedInTrackers } from "../src/auth/github";
+
+declare global {
+  interface ImportMeta { glob(patterns: string[], options: { query: "?raw"; import: "default"; eager: true }): Record<string, string> }
+}
+// The test runtime cannot read files: Vite inlines the template and every other wrangler configuration of the
+// checkout, so an operator's own deployment configurations are held to the same limits as the template.
+const deploymentConfigs = import.meta.glob(["../wrangler.jsonc", "../**/wrangler.jsonc", "!../**/node_modules/**", "!../**/.wrangler/**"], { query: "?raw", import: "default", eager: true });
 
 const repository = "example/project";
 const githubToken = "github-user-test-token";
@@ -32,8 +40,8 @@ function upstream(path: string, body: unknown, status = 200, headers?: Record<st
   for (let n = 0; n < count; n++) replies.push({ origin, path, status, body, headers });
 }
 
-async function exchange(body: unknown = { repository, tracker: "github" }, mapping = configured, token: string | null = githubToken, readerPolicy = "") {
-  const bindings = { ...env, GITHUB_REPOSITORIES: mapping, GITHUB_READ_APP: readerPolicy };
+async function exchange(body: unknown = { repository, tracker: "github" }, mapping = configured, token: string | null = githubToken, readerPolicy = "", mergePolicy = "", workflowGrants = "") {
+  const bindings = { ...env, GITHUB_REPOSITORIES: mapping, GITHUB_READ_APP: readerPolicy, GITHUB_MERGE_CLOSER: mergePolicy, GITHUB_WORKFLOW_GRANTS: workflowGrants };
   return exchangeGithub(new Request("https://beads.test/auth/github", {
     method: "POST", headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(body),
@@ -70,12 +78,12 @@ it("exchanges verified GitHub write access for a reusable tracker-scoped credent
 // Sensitive boundary: App reader identity can never inherit a repository's writer/import grant.
 it("exchanges only the pinned unsuspended App installation for tracker-scoped read access", async () => {
   githubBearer = "reader.app.jwt";
-  const appRead = JSON.stringify({ app_id: "4862598", installation_id: "12345", repositories: [repository] });
+  const appRead = JSON.stringify({ app_id: "1000001", installation_id: "12345", repositories: [repository] });
   const mapping = JSON.stringify({ [repository]: { trackers: ["github"], import: true } });
   const body = { repository, tracker: "github", credential_type: "github-app" };
   const appExchange = (requestBody: unknown = body, readerPolicy = appRead) => exchange(requestBody, mapping, githubBearer, readerPolicy);
-  upstream("/app", { id: 4862598 });
-  upstream(`/repos/${repository}/installation`, { id: 12345, app_id: 4862598, suspended_at: null });
+  upstream("/app", { id: 1000001 });
+  upstream(`/repos/${repository}/installation`, { id: 12345, app_id: 1000001, suspended_at: null });
   const response = await appExchange();
   expect(response.status).toBe(200);
   const credential = await response.json() as { token: string; expires_at: string };
@@ -88,16 +96,16 @@ it("exchanges only the pinned unsuspended App installation for tracker-scoped re
   expect((await call("GET", "/admin/keys", credential.token)).status).toBe(403);
   expect((await appExchange({ ...body, scopes: ["beads:write"] })).status).toBe(400);
   expect((await appExchange(body, "")).status).toBe(403);
-  expect((await appExchange(body, JSON.stringify({ app_id: "4862598", installation_id: "12345", repositories: ["other/project"] }))).status).toBe(403);
+  expect((await appExchange(body, JSON.stringify({ app_id: "1000001", installation_id: "12345", repositories: ["other/project"] }))).status).toBe(403);
   expect((await appExchange({ ...body, tracker: "other" })).status).toBe(403);
   upstream("/app", { id: 9876 });
   expect((await appExchange()).status).toBe(403);
   for (const installation of [
-    { id: 9876, app_id: 4862598, suspended_at: null },
+    { id: 9876, app_id: 1000001, suspended_at: null },
     { id: 12345, app_id: 9876, suspended_at: null },
-    { id: 12345, app_id: 4862598, suspended_at: "2026-10-09T00:00:00Z" },
+    { id: 12345, app_id: 1000001, suspended_at: "2026-10-09T00:00:00Z" },
   ]) {
-    upstream("/app", { id: 4862598 });
+    upstream("/app", { id: 1000001 });
     upstream(`/repos/${repository}/installation`, installation);
     expect((await appExchange()).status).toBe(403);
   }
@@ -298,8 +306,8 @@ it("issues only a configured portfolio reader workflow read-only access to mappe
 // Sensitive authorization boundary: an immutable reusable admission reads exactly one foreign tracker.
 it("bounds an exact reusable admission reader to its signed source and one target", async () => {
   const reader = "example/admission";
-  const grant = { workflow_ref: "delivery.yml",
-    job_workflow_ref: "example/shared/.github/workflows/product-delivery.yml@" + "b".repeat(40),
+  const grant = { workflow_ref: "deploy-app.yml",
+    job_workflow_ref: "example/shared/.github/workflows/shared-rollout.yml@" + "b".repeat(40),
     repository_owner_id: "2468", repository, tracker: "github" };
   const mapping = (grants: unknown[] = [grant]) => JSON.stringify({
     [repository]: { trackers: ["github", "another"], import: true },
@@ -307,7 +315,7 @@ it("bounds an exact reusable admission reader to its signed source and one targe
     [reader]: { trackers: ["admission"], oidc: { repository_id: "8642", workflow_refs: ["bridge.yml"] }, portfolio_readers: grants },
   });
   const claims = { repository: reader, repository_id: "8642", repository_owner_id: "2468",
-    workflow_ref: `${reader}/.github/workflows/delivery.yml@refs/heads/main`, workflow_sha: "a".repeat(40), sha: "a".repeat(40),
+    workflow_ref: `${reader}/.github/workflows/deploy-app.yml@refs/heads/main`, workflow_sha: "a".repeat(40), sha: "a".repeat(40),
     job_workflow_ref: grant.job_workflow_ref, job_workflow_sha: "b".repeat(40), run_attempt: "1",
     sub: `repo:${reader}:ref:refs/heads/main`, event_name: "workflow_dispatch" };
   const body = { repository, tracker: "github", credential_type: "github-portfolio-reader", reader };
@@ -338,6 +346,382 @@ it("bounds an exact reusable admission reader to its signed source and one targe
   for (const request of [{ ...body, tracker: "another" }, { ...body, repository: "example/other", tracker: "other" },
     { repository, tracker: "github" }]) expect((await exchange(request, mapping(), token)).status).toBe(403);
   expect((await exchange({ ...body, scopes: ["beads:write"] }, mapping(), token)).status).toBe(400);
+  // Explicit recovery events keep the same exact source/target and read-only ceiling.
+  const recoveryGrant = { workflow_ref: grant.workflow_ref, repository_owner_id: grant.repository_owner_id,
+    repository, tracker: "github", events: ["schedule", "workflow_run"] };
+  for (const event_name of recoveryGrant.events) {
+    const recovery = await exchange(body, mapping([recoveryGrant]), await oidcToken({ ...claims, event_name, run_attempt: "2" }));
+    expect(recovery.status).toBe(200);
+    const credential = await recovery.json();
+    if (typeof credential !== "object" || credential === null || !("token" in credential) || typeof credential.token !== "string") throw new Error("Reader token missing");
+    expect((await call("GET", "/t/github/v0/beads/ready", credential.token)).status).toBe(200);
+    expect((await call("GET", "/t/another/v0/beads/ready", credential.token)).status).toBe(403);
+    expect((await call("POST", "/t/github/v0/beads/issues", credential.token, { actor: "reader", title: "denied", issue_type: "task" })).status).toBe(403);
+  }
+  for (const event_name of ["push", "pull_request", "pull_request_target", "workflow_dispatch"]) {
+    expect((await exchange(body, mapping([recoveryGrant]), await oidcToken({ ...claims, event_name }))).status).toBe(403);
+  }
+  expect((await exchange(body, mapping([{ ...recoveryGrant, events: ["pull_request"] }]), token)).status).toBe(500);
   // A broad grant cannot silently shadow an exact grant for the same caller workflow.
-  expect((await exchange(body, mapping([grant, "delivery.yml"]), token)).status).toBe(500);
+  expect((await exchange(body, mapping([grant, "deploy-app.yml"]), token)).status).toBe(500);
+});
+
+// Sensitive authorization boundary: a native reader cannot elevate by omitting reader request fields.
+it("caps the protected same-repository workflow at read-only on explicit and default OIDC exchanges", async () => {
+  const grant = { workflow_ref: "secret-rotation.yml", repository_owner_id: "2468", repository, tracker: "github", environment: "protected-ops" };
+  const mapping = (grants: unknown[] = [grant]) => JSON.stringify({
+    [repository]: { trackers: ["github", "another"], import: true,
+      oidc: { repository_id: "5678", workflow_refs: [workflow, grant.workflow_ref], read_only_workflows: [grant.workflow_ref] }, portfolio_readers: grants },
+    "example/other": { trackers: ["other"], import: true, oidc: { repository_id: "9876", workflow_refs: [grant.workflow_ref] } },
+  });
+  const claims = { repository_owner_id: "2468", workflow_ref: `${repository}/.github/workflows/${grant.workflow_ref}@refs/heads/main`,
+    environment: grant.environment, sub: `repo:${repository}:environment:${grant.environment}`,
+    sha: "a".repeat(40), workflow_sha: "a".repeat(40), event_name: "workflow_dispatch", run_attempt: "1" };
+  const readerRequest = { repository, tracker: "github", credential_type: "github-portfolio-reader", reader: repository };
+  const defaultRequest = { repository, tracker: "github" };
+  const token = await oidcToken(claims);
+  upstream("/.well-known/jwks", { keys: [{ ...publicJwk, kid: "test-signing-key", alg: "RS256", use: "sig" }] }, 200, undefined, 1, "https://token.actions.githubusercontent.com");
+  for (const request of [readerRequest, defaultRequest]) {
+    const response = await exchange(request, mapping(), token);
+    if (replies[0]?.path === "/.well-known/jwks") replies.shift();
+    expect(response.status).toBe(200);
+    const credential = await response.json() as { token: string; expires_at: string };
+    expect(Date.parse(credential.expires_at) - Date.now()).toBeGreaterThan(0);
+    expect(Date.parse(credential.expires_at) - Date.now()).toBeLessThanOrEqual(3600_000);
+    expect((await call("GET", "/t/github/v0/beads/ready", credential.token)).status).toBe(200);
+    expect((await call("GET", "/t/github/v0/beads/context", credential.token)).status).toBe(200);
+    expect((await call("GET", "/t/github/v0/beads/operations", credential.token)).status).toBe(403);
+    expect((await call("GET", "/t/github/v0/beads/config:export", credential.token)).status).toBe(403);
+    expect((await call("GET", "/t/another/v0/beads/ready", credential.token)).status).toBe(403);
+    expect((await call("POST", "/t/github/v0/beads/issues", credential.token, { actor: "reader", title: "denied", issue_type: "task" })).status).toBe(403);
+    expect((await call("POST", "/t/github/v0/beads/issues:import", credential.token, {})).status).toBe(403);
+    expect((await call("GET", "/admin/keys", credential.token)).status).toBe(403);
+    for (const overrides of [{ repository: "fork/project" }, { repository_id: "1" }, { repository_owner_id: "1" },
+      { ref: "refs/heads/feature" }, { sha: undefined }, { workflow_sha: undefined }, { sha: "bad", workflow_sha: "bad" },
+      { workflow_sha: "b".repeat(40) }, { event_name: "push" }, { event_name: "schedule" }, { run_attempt: "2" },
+      { run_attempt: 1 }, { run_attempt: undefined }, { environment: undefined }, { environment: "production" },
+      { sub: `repo:${repository}:ref:refs/heads/main` }, { sub: `repo:${repository}:environment:production` },
+      { sub: "repo:example@2468/project@5678:ref:refs/heads/main" },
+      { sub: "repo:example@1/project@5678:environment:protected-ops" }]) {
+      expect((await exchange(request, mapping(), await oidcToken({ ...claims, ...overrides }))).status).toBe(403);
+    }
+    expect((await exchange(request, mapping(), await oidcToken(claims, true))).status).toBe(403);
+    expect((await exchange(request, mapping(), await oidcToken({ ...claims,
+      sub: "repo:example@2468/project@5678:environment:protected-ops" }))).status).toBe(200);
+    for (const foreign of [{ ...request, tracker: "another" }, { ...request, repository: "example/other", tracker: "other" }]) {
+      expect((await exchange(foreign, mapping(), token)).status).toBe(403);
+    }
+  }
+  expect((await exchange(readerRequest, mapping([grant, grant.workflow_ref]), token)).status).toBe(500);
+  expect((await exchange(readerRequest, mapping([{ ...grant, repository: "example/other", tracker: "other" }]), token)).status).toBe(500);
+  for (const environment of ["", 1, "protected-ops:ref:refs/heads/main"]) {
+    expect((await exchange(readerRequest, mapping([{ ...grant, environment }]), token)).status).toBe(500);
+  }
+  expect((await exchange(defaultRequest, mapping(), await oidcToken({
+    environment: "protected-ops", sub: `repo:${repository}:environment:protected-ops`,
+  }))).status).toBe(403);
+  // The exact per-workflow read ceiling holds for a job of the admitted workflow without its protected environment.
+  const withoutEnvironment = await exchange(defaultRequest, mapping(), await oidcToken({
+    workflow_ref: `${repository}/.github/workflows/${grant.workflow_ref}@refs/heads/main`,
+    environment: undefined, sub: `repo:${repository}:ref:refs/heads/main`,
+  }));
+  expect(withoutEnvironment.status).toBe(200);
+  const reader = await withoutEnvironment.json() as { token: string; expires_at: string };
+  expect(Date.parse(reader.expires_at) - Date.now()).toBeLessThanOrEqual(3600_000);
+  expect((await call("GET", "/t/github/v0/beads/ready", reader.token)).status).toBe(200);
+  expect((await call("GET", "/t/github/v0/beads/operations", reader.token)).status).toBe(403);
+  expect((await call("POST", "/t/github/v0/beads/issues", reader.token, { actor: "reader", title: "denied", issue_type: "task" })).status).toBe(403);
+  expect((await call("POST", "/t/github/v0/beads/issues:import", reader.token, {})).status).toBe(403);
+  for (const readOnlyWorkflows of [["other.yml"], [], [1]]) {
+    expect((await exchange(defaultRequest, JSON.stringify({ [repository]: { trackers: ["github"], oidc: {
+      repository_id: "5678", workflow_refs: [workflow], read_only_workflows: readOnlyWorkflows } } }), token)).status).toBe(500);
+  }
+  const writerResponse = await exchange(defaultRequest, mapping(), await oidcToken());
+  expect(writerResponse.status).toBe(200);
+  const writer = await writerResponse.json() as { token: string; expires_at: string };
+  expect(Date.parse(writer.expires_at) - Date.now()).toBeGreaterThan(12 * 3600_000);
+  expect((await call("POST", "/t/github/v0/beads/issues", writer.token, { actor: "writer", title: "still authorized", issue_type: "task" })).status).toBe(200);
+  expect((await call("POST", "/t/github/v0/beads/issues:import", writer.token, {
+    actor: "writer", issues: [{ id: "github-imported", title: "history", status: "open", priority: 2, issue_type: "task",
+      created_at: "2025-01-01T00:00:00Z", updated_at: "2025-01-01T00:00:00Z", created_by: "author" }],
+  })).status).toBe(200);
+});
+
+
+const mergeWorkflow = `${repository}/.github/workflows/merge.yml@refs/heads/main`;
+const mergeMapping = JSON.stringify({
+  [repository]: { trackers: ["github"], import: true, oidc: { repository_id: "5678", workflow_refs: [workflow] } },
+  "example/product": { trackers: ["product"] },
+});
+const mergeClaims = { workflow_ref: mergeWorkflow, event_name: "schedule", repository_owner_id: "2468",
+  run_attempt: "1", run_id: "12345", sha: "a".repeat(40), workflow_sha: "a".repeat(40),
+  // GitHub signs these on every job; a direct workflow names itself at the run source.
+  job_workflow_ref: mergeWorkflow, job_workflow_sha: "a".repeat(40) };
+
+async function memberPermit() {
+  githubPermission(); githubUser();
+  const holder = await (await exchange()).json() as { token: string };
+  const created = await call("POST", "/t/github/v0/beads/issues", holder.token, { title: "merge member", issue_type: "task", actor: "implementation" });
+  const id = String(created.body.id);
+  expect((await call("POST", `/t/github/v0/beads/issues/${id}:claim`, holder.token, { actor: "implementation" })).status).toBe(200);
+  const request = { repository: "example/product", head: "b".repeat(40), worker: "implementation" };
+  githubPermission(); upstream("/user", { id: 9999 });
+  const foreign = await (await exchange()).json() as { token: string };
+  expect((await call("POST", `/t/github/v0/beads/issues/${id}:mergePermit`, foreign.token, request)).status).toBe(400);
+  expect((await call("POST", `/t/github/v0/beads/issues/${id}:mergePermit`, holder.token, { ...request, worker: "different-worker" })).status).toBe(400);
+  const granted = await call("POST", `/t/github/v0/beads/issues/${id}:mergePermit`, holder.token, request);
+  expect(granted.status).toBe(200);
+  const proof: MergeProof = { repository: request.repository, tracker_repository: repository, tracker: "github", id,
+    head: request.head, commit: "c".repeat(40), member: 42, permit: String(granted.body.permit) };
+  return { holder: holder.token, proof };
+}
+
+async function mergeExchange(proof?: MergeProof, claims: Record<string, unknown> = {}) {
+  return exchange({ repository, tracker: "github", credential_type: "github-merge-closure", reader: repository,
+    ...(proof ? { merge_proof: proof } : {}) }, mergeMapping, await oidcToken({ ...mergeClaims, ...claims }), "",
+    JSON.stringify({ repository, workflow_ref: "merge.yml", repository_owner_id: "2468" }));
+}
+
+it("closes only the permitted exact member under the source-bound merge identity, preserving ordinary claim guards", async () => {
+  const { holder, proof } = await memberPermit();
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:close`, holder, { actor: "batch", reason: "ordinary close cannot take the holder" })).status).toBe(409);
+  const response = await mergeExchange(proof);
+  expect(response.status).toBe(200);
+  const { token } = await response.json() as { token: string };
+  const renewed = await mergeExchange(proof, { run_id: "12346", sha: "d".repeat(40), workflow_sha: "d".repeat(40), job_workflow_sha: "d".repeat(40) });
+  expect(renewed.status).toBe(200);
+  const nextCredential = await renewed.json() as { token: string };
+  expect(nextCredential.token).not.toBe(token);
+  const firstIdentity = (await call("GET", "/t/github/v0/beads/context", token)).body.x_identity.verified_principal.subject;
+  expect((await call("GET", "/t/github/v0/beads/context", nextCredential.token)).body.x_identity.verified_principal.subject).toBe(firstIdentity);
+  const issue = await call("GET", `/t/github/v0/beads/issues/${proof.id}`, token);
+  const body = { actor: "merge-closer", reason: mergeReason(proof), expected_version: issue.body.revision, x_merge_proof: proof };
+  for (const [method, path, payload] of [
+    ["POST", "/t/github/v0/beads/issues", { title: "forbidden", issue_type: "task" }],
+    ["PATCH", `/t/github/v0/beads/issues/${proof.id}`, { title: "forbidden" }],
+    ["POST", `/t/github/v0/beads/issues/${proof.id}:release`, { force: true }],
+    ["POST", `/t/github/v0/beads/issues/${proof.id}:mergePermit`, { repository, head: proof.head, worker: "batch" }],
+    ["POST", "/t/github/v0/beads/issues:import", {}],
+    ["POST", "/t/github/v0/beads/issues:batchApply", {}],
+    ["GET", "/admin/keys", undefined],
+    ["POST", `/t/other/v0/beads/issues/${proof.id}:close`, body],
+  ] as const) expect((await call(method, path, token, payload)).status).toBe(403);
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:close`, token, { ...body, force: true })).status).toBe(400);
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:close`, token, { ...body, x_merge_proof: { ...proof, commit: "d".repeat(40) } })).status).toBe(403);
+  const accepted = await call("POST", `/t/github/v0/beads/issues/${proof.id}:close`, token, body);
+  expect(accepted.body, JSON.stringify(accepted.body)).toMatchObject({ issue: { status: "closed" } });
+  expect(accepted.status).toBe(200);
+  const closed = await call("GET", `/t/github/v0/beads/issues/${proof.id}`, holder);
+  expect(closed.body.status).toBe("closed");
+  expect(closed.body.close_reason).toBe(mergeReason(proof));
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:reopen`, holder, { actor: "implementation" })).status).toBe(200);
+  const reopened = await call("GET", `/t/github/v0/beads/issues/${proof.id}`, holder);
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:close`, token, { ...body, expected_version: reopened.body.revision })).status).toBe(409);
+});
+
+it("denies wrong workflow source, owner, run, ref, grant route and modified or cross-target permits", async () => {
+  const { proof } = await memberPermit();
+  for (const claims of [
+    { workflow_ref: workflow }, { repository_id: "9999" }, { repository_owner_id: "9999" },
+    { run_attempt: "2" }, { run_id: "" }, { workflow_sha: "d".repeat(40) }, { sha: "bad" },
+    { event_name: "push" }, { event_name: "pull_request_target" }, { ref: "refs/heads/branch" },
+    { environment: "protected-ops" }, { job_workflow_ref: workflow }, { job_workflow_ref: undefined },
+    { job_workflow_sha: "d".repeat(40) }, { job_workflow_sha: undefined },
+  ]) expect((await mergeExchange(proof, claims)).status).toBe(403);
+  expect((await exchange(undefined, mergeMapping, await oidcToken(mergeClaims))).status).toBe(403);
+  for (const modified of [{ ...proof, head: "d".repeat(40) }, { ...proof, id: "other-id" },
+    { ...proof, tracker: "product" }, { ...proof, tracker_repository: "example/product" },
+    { ...proof, permit: proof.permit.replace(/.$/, "x") }]) expect((await mergeExchange(modified)).status).toBe(403);
+  const response = await mergeExchange();
+  expect(response.status).toBe(200);
+  const preflight = await response.json() as { token: string };
+  expect((await call("GET", "/t/github/v0/beads/context", preflight.token)).status).toBe(200);
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:close`, preflight.token, {})).status).toBe(403);
+});
+
+it("retains a new independent implementation claim after an old member holder delegated closure", async () => {
+  const { holder, proof } = await memberPermit();
+  const response = await mergeExchange(proof);
+  expect(response.status).toBe(200);
+  const { token } = await response.json() as { token: string };
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:release`, holder, { actor: "implementation" })).status).toBe(200);
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:claim`, holder, { actor: "independent-implementation" })).status).toBe(200);
+  const before = await call("GET", `/t/github/v0/beads/issues/${proof.id}`, holder);
+  expect((await call("POST", `/t/github/v0/beads/issues/${proof.id}:close`, token,
+    { actor: "merge-closer", reason: mergeReason(proof), expected_version: before.body.revision, x_merge_proof: proof })).status).toBe(409);
+  const after = await call("GET", `/t/github/v0/beads/issues/${proof.id}`, holder);
+  expect(after.body).toEqual(before.body);
+});
+
+it("separates exact workflow mutation grants from readers and never grants import or another tracker", async () => {
+  const caller = "example/controller";
+  const grant = { workflow_ref: "release.yml", repository_owner_id: "2468", repository, tracker: "github",
+    events: ["workflow_dispatch"], job_workflow_ref: "example/shared/.github/workflows/release.yml@" + "b".repeat(40) };
+  const mapping = (writers: unknown[] | undefined = [grant]) => JSON.stringify({
+    [repository]: { trackers: ["github", "another"], import: true },
+    [caller]: { trackers: ["controller"], oidc: { repository_id: "8642", workflow_refs: ["bridge.yml"] },
+      portfolio_readers: [grant], ...(writers ? { portfolio_writers: writers } : {}) },
+  });
+  const claims = { repository: caller, repository_id: "8642", repository_owner_id: "2468", run_id: "12345", run_attempt: "1",
+    workflow_ref: `${caller}/.github/workflows/release.yml@refs/heads/main`, workflow_sha: "a".repeat(40), sha: "a".repeat(40),
+    job_workflow_ref: grant.job_workflow_ref, job_workflow_sha: "b".repeat(40), sub: `repo:${caller}:ref:refs/heads/main`, event_name: "workflow_dispatch" };
+  const body = { repository, tracker: "github", credential_type: "github-workflow-writer", reader: caller };
+  upstream("/.well-known/jwks", { keys: [{ ...publicJwk, kid: "test-signing-key", alg: "RS256", use: "sig" }] }, 200, undefined, 1, "https://token.actions.githubusercontent.com");
+  const token = await oidcToken(claims);
+  const response = await exchange(body, mapping(), token);
+  if (replies[0]?.path === "/.well-known/jwks") replies.shift();
+  expect(response.status).toBe(200);
+  const issued = await response.json();
+  if (typeof issued !== "object" || issued === null || !("token" in issued) || typeof issued.token !== "string" ||
+      !("expires_at" in issued) || typeof issued.expires_at !== "string") throw new Error("Writer credential missing");
+  expect(Date.parse(issued.expires_at) - Date.now()).toBeLessThanOrEqual(15 * 60_000);
+  expect((await call("POST", "/t/github/v0/beads/issues", issued.token, { actor: "writer", title: "window intent", issue_type: "task" })).status).toBe(200);
+  expect((await call("POST", "/t/github/v0/beads/issues:import", issued.token, {})).status).toBe(403);
+  expect((await call("GET", "/t/another/v0/beads/ready", issued.token)).status).toBe(403);
+  expect((await call("GET", "/admin/keys", issued.token)).status).toBe(403);
+  const readerResponse = await exchange({ ...body, credential_type: "github-portfolio-reader" }, mapping(), token);
+  const reader = await readerResponse.json();
+  if (typeof reader !== "object" || reader === null || !("token" in reader) || typeof reader.token !== "string") throw new Error("Reader missing");
+  expect((await call("POST", "/t/github/v0/beads/issues", reader.token, { actor: "reader", title: "denied", issue_type: "task" })).status).toBe(403);
+  for (const overrides of [{ repository_id: "1" }, { repository_owner_id: "1" }, { ref: "refs/heads/feature" },
+    { event_name: "pull_request" }, { run_attempt: "2" }, { run_id: undefined }, { workflow_sha: "c".repeat(40) },
+    { job_workflow_sha: "c".repeat(40) }, { job_workflow_ref: undefined }, { environment: "production" }]) {
+    expect((await exchange(body, mapping(), await oidcToken({ ...claims, ...overrides }))).status).toBe(403);
+  }
+  expect((await exchange(body, mapping([]), token)).status).toBe(500);
+  expect((await exchange(body, mapping(["release.yml"]), token)).status).toBe(500);
+  expect((await exchange({ ...body, tracker: "another" }, mapping(), token)).status).toBe(403);
+  const withoutWriters = JSON.parse(mapping()); delete withoutWriters[caller].portfolio_writers;
+  expect((await exchange(body, JSON.stringify(withoutWriters), token)).status).toBe(403);
+  const { job_workflow_ref: _producer, ...nativeGrant } = grant;
+  const nativeClaims = { ...claims, job_workflow_ref: claims.workflow_ref, job_workflow_sha: claims.sha };
+  expect((await exchange(body, mapping([nativeGrant]), await oidcToken(nativeClaims))).status).toBe(200);
+  expect((await exchange(body, mapping([nativeGrant]), token)).status).toBe(403);
+});
+
+interface CompactGrants {
+  repository_owner_id: string; repository: string; tracker: string;
+  readers?: Record<string, Record<string, string[]>>;
+  writers?: Record<string, Record<string, { events: string[]; job_workflow_ref?: string }>>;
+}
+
+/** The equivalent inline form: each compact grant as a portfolio_readers/portfolio_writers object after the inline grants. */
+/** Each compact grant with its caller repository and workflow file name, readers first. */
+function compactGrants(compact: CompactGrants) {
+  return [
+    ...Object.entries(compact.readers ?? {}).flatMap(([caller, workflows]) => Object.entries(workflows).map(([workflow, events]) =>
+      ({ kind: "readers", caller, workflow, events, job_workflow_ref: undefined as string | undefined }))),
+    ...Object.entries(compact.writers ?? {}).flatMap(([caller, workflows]) => Object.entries(workflows).map(([workflow, grant]) =>
+      ({ kind: "writers", caller, workflow, events: grant.events, job_workflow_ref: grant.job_workflow_ref }))),
+  ];
+}
+
+/** The equivalent inline form: each compact grant as a portfolio_readers/portfolio_writers object after the inline grants. */
+function inlineWorkflowGrants(mapping: string, compact: CompactGrants): string {
+  const policy = JSON.parse(mapping) as Record<string, Record<string, unknown>>;
+  for (const grant of compactGrants(compact)) {
+    const entry = policy[grant.caller]!;
+    const field = grant.kind === "readers" ? "portfolio_readers" : "portfolio_writers";
+    entry[field] = [...((entry[field] as unknown[] | undefined) ?? []), { workflow_ref: grant.workflow,
+      repository_owner_id: compact.repository_owner_id, repository: compact.repository, tracker: compact.tracker, events: grant.events,
+      ...(grant.job_workflow_ref ? { job_workflow_ref: grant.job_workflow_ref } : {}) }];
+  }
+  return JSON.stringify(policy);
+}
+
+/** Exchanges every compact grant's exact caller identity, for each of its events, under the inline and the split form. */
+async function sameAdmissions(mapping: string, compact: CompactGrants) {
+  const inline = inlineWorkflowGrants(mapping, compact);
+  const callers = JSON.parse(mapping) as Record<string, { oidc?: { repository_id: string } }>;
+  upstream("/.well-known/jwks", { keys: [{ ...publicJwk, kid: "test-signing-key", alg: "RS256", use: "sig" }] }, 200, undefined, 1, "https://token.actions.githubusercontent.com");
+  for (const { kind, caller, workflow, events, job_workflow_ref: jobWorkflowRef } of compactGrants(compact)) {
+    const workflowRef = `${caller}/.github/workflows/${workflow}@refs/heads/main`;
+    const body = { repository: compact.repository, tracker: compact.tracker, reader: caller,
+      credential_type: kind === "readers" ? "github-portfolio-reader" : "github-workflow-writer" };
+    for (const event_name of [...events, "push"]) {
+      const token = await oidcToken({ repository: caller, repository_id: callers[caller]?.oidc?.repository_id,
+        repository_owner_id: compact.repository_owner_id, workflow_ref: workflowRef, sub: `repo:${caller}:ref:refs/heads/main`, event_name,
+        run_id: "12345", run_attempt: event_name === "schedule" || event_name === "workflow_run" ? "2" : "1",
+        sha: "a".repeat(40), workflow_sha: "a".repeat(40),
+        job_workflow_ref: jobWorkflowRef ?? workflowRef, job_workflow_sha: jobWorkflowRef?.slice(-40) ?? "a".repeat(40) });
+      const admitted: unknown[] = [];
+      for (const [repositories, grants] of [[inline, ""], [mapping, JSON.stringify(compact)]] as const) {
+        const response = await exchange(body, repositories, token, "", "", grants);
+        if (replies[0]?.path === "/.well-known/jwks") replies.shift();
+        const label = `${kind} ${caller} ${workflow} ${event_name}`;
+        if (event_name === "push") { expect(response.status, label).toBe(403); continue; }
+        expect(response.status, label).toBe(200);
+        const { token: credential } = await response.json() as { token: string };
+        const write = await call("POST", `/t/${compact.tracker}/v0/beads/issues`, credential, { actor: "grant", title: "compact grant", issue_type: "task" });
+        expect(write.status, label).toBe(kind === "writers" ? 200 : 403);
+        admitted.push((await call("GET", `/t/${compact.tracker}/v0/beads/context`, credential)).body.x_identity.verified_principal.subject);
+      }
+      expect(admitted[1]).toEqual(admitted[0]);
+    }
+  }
+}
+
+// Sensitive authorization boundary: a compact grant is the same exact grant as its inline form, never a broader one.
+it("admits compact workflow grants exactly like their inline form and denies every tracker for a malformed compact binding", async () => {
+  const caller = "example/controller";
+  const inlineReader = { workflow_ref: "deploy-app.yml", job_workflow_ref: "example/shared/.github/workflows/shared-rollout.yml@" + "c".repeat(40),
+    repository_owner_id: "2468", repository, tracker: "github" };
+  const mapping = JSON.stringify({
+    [repository]: { trackers: ["github", "another"], import: true },
+    [caller]: { trackers: ["controller"], oidc: { repository_id: "8642", workflow_refs: ["bridge.yml"] }, portfolio_readers: [inlineReader] },
+    "example/plain": { trackers: ["plain"] },
+  });
+  const compact: CompactGrants = { repository_owner_id: "2468", repository, tracker: "github",
+    readers: { [caller]: { "state.yml": ["workflow_dispatch"], "recovery.yml": ["workflow_dispatch", "schedule", "workflow_run"], "release.yml": ["workflow_dispatch"] } },
+    writers: { [caller]: { "recovery.yml": { events: ["workflow_dispatch", "schedule", "workflow_run"] },
+      "release.yml": { events: ["workflow_dispatch"], job_workflow_ref: "example/shared/.github/workflows/release.yml@" + "b".repeat(40) } } } };
+  await oidcToken();
+  expect(signedInTrackers({ ...env, GITHUB_REPOSITORIES: mapping, GITHUB_WORKFLOW_GRANTS: JSON.stringify(compact) }))
+    .toEqual(signedInTrackers({ ...env, GITHUB_REPOSITORIES: inlineWorkflowGrants(mapping, compact), GITHUB_WORKFLOW_GRANTS: "" }));
+  await sameAdmissions(mapping, compact);
+  const reader = (workflows: unknown) => ({ ...compact, readers: { [caller]: workflows } });
+  const writer = (workflows: unknown) => ({ ...compact, writers: { [caller]: workflows } });
+  for (const malformed of ["not json", [], { ...compact, scopes: ["beads:write"] }, { ...compact, repository: undefined },
+    { ...compact, repository: "example/unmapped" }, { ...compact, tracker: "plain" }, { ...compact, repository_owner_id: "0123" },
+    { ...compact, repository_owner_id: 2468 }, { repository_owner_id: "2468", repository, tracker: "github" }, { ...compact, readers: {} },
+    { ...compact, readers: { "example/unmapped": { "state.yml": ["workflow_dispatch"] } } },
+    { ...compact, readers: { "example/plain": { "state.yml": ["workflow_dispatch"] } } }, reader({}),
+    reader({ ".github/workflows/state.yml": ["workflow_dispatch"] }), reader({ "state.sh": ["workflow_dispatch"] }),
+    reader({ "state.yml": [] }), reader({ "state.yml": ["push"] }), reader({ "state.yml": ["pull_request_target"] }),
+    reader({ "state.yml": ["workflow_dispatch", "workflow_dispatch"] }), reader({ "state.yml": "workflow_dispatch" }),
+    reader({ "state.yml": { events: ["workflow_dispatch"] } }), reader({ "deploy-app.yml": ["workflow_dispatch"] }),
+    writer({ "recovery.yml": ["workflow_dispatch"] }), writer({ "recovery.yml": { events: [] } }),
+    writer({ "recovery.yml": { events: ["workflow_dispatch"], environment: "production" } }),
+    writer({ "release.yml": { events: ["workflow_dispatch"], job_workflow_ref: "example/shared/.github/workflows/release.yml@main" } }),
+    JSON.stringify(compact) + " ".repeat(5120)]) {
+    const raw = typeof malformed === "string" ? malformed : JSON.stringify(malformed);
+    expect(signedInTrackers({ ...env, GITHUB_REPOSITORIES: mapping, GITHUB_WORKFLOW_GRANTS: raw }), raw).toEqual([]);
+    expect((await exchange(undefined, mapping, githubToken, "", "", raw)).status, raw).toBe(500);
+  }
+  // Compact grants never map a repository: without the repository mapping they deny every tracker.
+  expect(signedInTrackers({ ...env, GITHUB_REPOSITORIES: "", GITHUB_WORKFLOW_GRANTS: JSON.stringify(compact) })).toEqual([]);
+});
+
+/** Every plain-text variable of a wrangler configuration (upper-case keys appear only under vars). */
+function configVars(source: string): Record<string, string> {
+  return Object.fromEntries([...source.matchAll(/^\s*"([A-Z][A-Z0-9_]*)":\s*("(?:[^"\\]|\\.)*")/gm)]
+    .map(([, name, literal]) => [name!, JSON.parse(literal!) as string]));
+}
+
+// Sensitive authorization boundary: the deployed policy fits Cloudflare's per-binding limit without changing any admission.
+it("keeps every deployment binding within 5120 bytes and admits each deployed compact grant exactly like its inline form", async () => {
+  expect(Object.keys(deploymentConfigs)).toContain("../wrangler.jsonc");
+  await oidcToken();
+  for (const [file, source] of Object.entries(deploymentConfigs)) {
+    const vars = configVars(source);
+    expect(Object.keys(vars), file).toEqual(expect.arrayContaining(["GITHUB_REPOSITORIES", "GITHUB_WORKFLOW_GRANTS"]));
+    for (const [name, value] of Object.entries(vars)) expect(new TextEncoder().encode(value).byteLength, `${file} ${name}`).toBeLessThanOrEqual(5120);
+    const bindings = { ...env, GITHUB_REPOSITORIES: vars.GITHUB_REPOSITORIES!, GITHUB_WORKFLOW_GRANTS: vars.GITHUB_WORKFLOW_GRANTS! };
+    expect(signedInTrackers(bindings), file).not.toEqual([]);
+    if (!bindings.GITHUB_WORKFLOW_GRANTS) continue;
+    const compact = JSON.parse(bindings.GITHUB_WORKFLOW_GRANTS) as CompactGrants;
+    expect(signedInTrackers(bindings)).toEqual(signedInTrackers({ ...env,
+      GITHUB_REPOSITORIES: inlineWorkflowGrants(bindings.GITHUB_REPOSITORIES, compact), GITHUB_WORKFLOW_GRANTS: "" }));
+    await sameAdmissions(bindings.GITHUB_REPOSITORIES, compact);
+  }
 });

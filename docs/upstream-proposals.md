@@ -2,9 +2,10 @@
 
 Three small changes to [gastownhall/beads](https://github.com/gastownhall/beads) that
 would let this backend, and any other out-of-tree backend, behave like an in-tree
-one. They are prepared here and **not submitted**; each patch is against the
-`v1.3.1` tag, builds and vets there, and is deliberately the smallest change that
-does the job. Line numbers are from `v1.3.1`.
+one. They are prepared here and **not yet submitted**: no issue or pull request has been
+opened upstream. Each patch is against the `v1.3.4` tag, applies there with a plain
+`git apply` and builds and vets there, and is deliberately the smallest change that
+does the job. Line numbers are from `v1.3.4`.
 
 ## 1. Export a reader for the lease TTL
 
@@ -54,6 +55,7 @@ index de2f184..e1af27e 100644
 +
  // Iter is the streaming-read cursor returned by the Iter* methods.
  type Iter[T any] = storage.Iter[T]
+ 
 ```
 
 **Why it is safe.** One new exported function that forwards to an existing one. No
@@ -73,7 +75,7 @@ exactly one method, `GetLocalMetadata`, which every backend implements through
 
 **Change.** When the workspace's configured backend is a registered one (the name
 `dolt` is reserved and never registered, `internal/storage/backends/backends.go:56`),
-open it through the registry, as every other command does (`cmd/bd/main.go:1853`),
+open it through the registry, as every other command does (`cmd/bd/main.go:1875`),
 and run the same version comparison against it. The shared check takes a one-method
 interface instead of `*dolt.DoltStore`, and a label for the `Storage:` line.
 
@@ -182,6 +184,7 @@ index 97b0c8f..2eaec3e 100644
 +		Detail:  "Storage: " + storageName,
  	}
  }
+ 
 ```
 
 **Scope.** This covers the database-version check, which is the one that fails on a
@@ -232,7 +235,7 @@ index de2f184..6ee5753 100644
 ```
 
 **Why it is safe.** An alias names the same type, so every existing `errors.As` against the
-internal type keeps matching. Built and vetted at `v1.3.1` (`go build ./backend && go vet
+internal type keeps matching. Built and vetted at `v1.3.4` (`go build ./backend && go vet
 ./backend`). Patches 1 and 3 both add the `issueops` import; applied together it appears once.
 
 ## Note to the maintainers
@@ -245,13 +248,13 @@ A draft, to be sent when the maintainers of this backend decide to. Not sent.
 >
 > We built a storage backend for bd that keeps a tracker in a Cloudflare Worker, on
 > top of the `backend` package and its conformance suite. It is registered by name
-> with one blank import, so a bd build is upstream v1.3.1 plus that import and no
+> with one blank import, so a bd build is upstream v1.3.4 plus that import and no
 > patches. It is MIT licensed and pre-1.0, in one repository with the server it
 > talks to (which serves the `bd serve` `/v0` contract), the client being the `bd/`
 > Go module:
 > https://github.com/kombifyio/beads-cloudflare
 >
-> Against the v1.3.1 conformance suite it passes the unsupported contract and 52 of
+> Against the v1.3.4 conformance suite it passes the unsupported contract and 52 of
 > 60 checks on the portable surface. Of the eight that fail, two come from what the
 > public package does not expose: the lease TTL context value and the typed error for
 > the row cap. We have written patches in case they are useful: one exporting a reader

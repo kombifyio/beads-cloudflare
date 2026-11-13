@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a focused change to the store, the bd backend or the setup tool.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: "Check open issues first. Proposals that change upstream Beads behaviour belong upstream; this project keeps upstream semantics (see docs/compatibility.md)."
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do and what stops you today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: The smallest change that solves it, from the point of view of a bd user or an operator.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried, and why they are not enough.

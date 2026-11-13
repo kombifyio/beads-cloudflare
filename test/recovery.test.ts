@@ -8,14 +8,15 @@ const importKey = async (name: string) => (await call("POST", "/admin/keys", env
 
 it("fences recovery against non-journal mutations and preserves the destination on refusal", async () => {
   const name = "recovery-fence";
-  const t = tracker(name, await importKey(name));
+  const key = await importKey(name);
+  const t = tracker(name, key);
   const revision = async () => (await t.get("/context")).body.x_mutation_revision as number;
   const restore = (expected_revision: number, require_empty: boolean) => t.post("/issues:import", {
     mode: "replace", restore_guard: { schema_version: 1, expected_revision, require_empty },
     issues: [{ id: `${name}-restored`, title: "restore", status: "open", priority: 2, created_at: "2025-01-01T00:00:00Z" }],
   });
   const empty = await revision();
-  await t.post("/memories", { key: "intervening", content: "do not overwrite" });
+  await call("POST", `/t/${name}/v0/beads/memories`, key, { key: "intervening", content: "do not overwrite" });
   const changed = await revision();
   expect(changed).toBeGreaterThan(empty);
   expect((await restore(empty, true)).body.reason).toBe("restore_revision_changed");
@@ -24,10 +25,10 @@ it("fences recovery against non-journal mutations and preserves the destination 
   expect((await t.get("/memories/intervening")).body.value).toBe("do not overwrite");
 
   const afterMemory = await revision();
-  await t.post("/config", { key: "retained", value: "config mutation" }, { "Idempotency-Key": "recovery-config" });
+  await call("POST", `/t/${name}/v0/beads/config`, key, { key: "retained", value: "config mutation" }, { "Idempotency-Key": "recovery-config" });
   const afterConfig = await revision();
   expect(afterConfig).toBeGreaterThan(afterMemory);
-  await t.post("/config", { key: "retained", value: "config mutation" }, { "Idempotency-Key": "recovery-config" });
+  await call("POST", `/t/${name}/v0/beads/config`, key, { key: "retained", value: "config mutation" }, { "Idempotency-Key": "recovery-config" });
   expect(await revision()).toBe(afterConfig);
   expect((await restore(afterMemory, false)).body.reason).toBe("restore_revision_changed");
   await t.post("/issues:import", { project_id: "changed-project" });

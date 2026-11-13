@@ -21,6 +21,7 @@ export interface Ctx {
   agent?: string;
   /** A merge import by a caller holding beads:import: provenance (authors, creators, timestamps, leases) is kept as given. */
   preserveProvenance?: boolean;
+  mergePermit?: import("../auth/merge-close").MergePermit;
   now: string;
 }
 

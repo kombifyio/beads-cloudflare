@@ -5,7 +5,7 @@ allowBuilds:
 # Vite+: one pinned version of the toolchain. `vite` is the vite-plus-core build of Vite 8
 # (bundled Vite 8.3.5 at 1.4.0); `vp dev`, `vp build` and `vp test` need every package that
 # imports `vite` to resolve to it. Move both entries together.
-# This package is installed from GitHub by `npx github:kombifyio/beads-cloudflare setup`: npm
+# This package can also be installed from GitHub (`npx github:kombifyio/beads-cloudflare`): npm
 # prepares the clone with its devDependencies and refuses the `catalog:` protocol
 # (EUNSUPPORTEDPROTOCOL), so package.json names the same three versions explicitly and the
 # overrides below make pnpm resolve them from this catalog. Keep the four places in step.
