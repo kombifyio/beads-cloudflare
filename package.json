@@ -1,0 +1,88 @@
+{
+  "name": "beads-cloudflare",
+  "version": "0.2.18",
+  "description": "A shared Beads tracker in a Cloudflare Worker you own: one store for every agent, machine and CI job, used through the ordinary bd command.",
+  "keywords": [
+    "beads",
+    "bd",
+    "issue-tracker",
+    "coding-agents",
+    "cloudflare-workers",
+    "durable-objects",
+    "mcp"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kombifyio/beads-cloudflare.git"
+  },
+  "homepage": "https://github.com/kombifyio/beads-cloudflare#readme",
+  "bugs": {
+    "url": "https://github.com/kombifyio/beads-cloudflare/issues"
+  },
+  "bin": {
+    "beads-cloudflare": "cli/beads-cloudflare.mjs"
+  },
+  "files": [
+    "cli/",
+    "!cli/*.test.mjs",
+    "!cli/create/",
+    "src/",
+    "cloudflare.config.ts",
+    "wrangler.jsonc",
+    "VERSION",
+    "SETUP.md",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "docs/compatibility.md",
+    "docs/security-model.md",
+    "docs/costs-and-limits.md",
+    "docs/cloudflare-cli.md",
+    "docs/artifacts.md",
+    "docs/operations.md",
+    "docs/profile.md",
+    "scripts/tracker-snapshot.mjs",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "dev": "vp dev --host 127.0.0.1 --port 8788",
+    "dev:wrangler": "wrangler dev --config wrangler.jsonc --port 8788",
+    "build": "vp build",
+    "preview": "vp preview",
+    "types": "wrangler types --strict-vars=false",
+    "gen": "openapi-typescript spec/upstream/openapi.v0.yaml -o src/generated/openapi.v0.ts",
+    "typecheck": "pnpm types && tsc --noEmit",
+    "check": "pnpm types && vp check --no-fmt src test",
+    "test": "vp test run",
+    "test:cli": "node --test \"cli/*.test.mjs\"",
+    "test:pure": "node --test test/tracker-snapshot.pure.test.mjs scripts/import-prefix.test.mjs",
+    "version:sync": "node scripts/sync-version.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.64.0",
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "@cloudflare/workers-oauth-provider": "1.2.3",
+    "@modelcontextprotocol/server": "2.3.1",
+    "@types/node": "^26.6.5",
+    "cf": "1.0.0-beta.28",
+    "openapi-typescript": "7.13.0",
+    "typescript": "6.0.3",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0",
+    "vite-plus": "1.4.0",
+    "vitest": "5.0.5",
+    "wrangler": "4.151.3",
+    "zod": "4.6.7"
+  },
+  "packageManager": "pnpm@12.14.0",
+  "engines": {
+    "node": "^22.23.0 || ^24.22.0 || >=26.12.0"
+  }
+}

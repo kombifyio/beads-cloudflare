@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a reproducible product or installation problem.
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include tokens, private tracker content or secret files. Report vulnerabilities through the repository's Security tab."
+  - type: input
+    id: version
+    attributes:
+      label: Release and environment
+      description: Worker/setup release, bd version, operating system and Node version.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest steps and commands that reproduce the problem, with credentials removed.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+      description: Include relevant redacted error output.
+    validations:
+      required: true
